@@ -200,7 +200,9 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
                         T0 = T_bare(Rnij, dT0, grad_ij%dcoords)
                         T = damping_grad(f_damp, df, T0, dT0, dT, grad_ij)
                     case ("sqrtfermi,dip")
-                        T = damping_sqrtfermi(Rnij, beta_R_vdw, damp%a) * T_bare(Rnij)
+                        f_damp = damping_sqrtfermi(Rnij, beta_R_vdw, damp%a, df, grad_ij)
+                        T0 = T_bare(Rnij, dT0, grad_ij%dcoords)
+                        T = damping_grad(f_damp, df, T0, dT0, dT, grad_ij)
                     case ("custom,dip")
                         T = damp%damping_custom(i_atom, j_atom) * T_bare(Rnij)
                     case ("dip,custom")
@@ -214,8 +216,10 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
                         T = damping_grad(f_damp, df, T0, dT0, dT, grad_ij)
                         do_ewald = .false.
                     case ("sqrtfermi,dip,gg")
-                        T = (1d0 - damping_sqrtfermi(Rnij, beta_R_vdw, damp%a)) * &
-                            T_erf_coulomb(Rnij, sigma_ij)
+                        f_damp = damping_sqrtfermi(Rnij, beta_R_vdw, damp%a, df, grad_ij)
+                        call op1minus_grad(f_damp, df)
+                        T0 = T_erf_coulomb(Rnij, sigma_ij, dT0, grad_ij)
+                        T = damping_grad(f_damp, df, T0, dT0, dT, grad_ij)
                         do_ewald = .false.
                     case ("custom,dip,gg")
                         T = (1d0 - damp%damping_custom(i_atom, j_atom)) * &

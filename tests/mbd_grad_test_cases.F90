@@ -4,7 +4,7 @@
 module mbd_grad_test_cases
 
 use mbd_constants
-use mbd_damping, only: damping_t, damping_fermi
+use mbd_damping, only: damping_t, damping_fermi, damping_sqrtfermi
 use mbd_dipole, only: dipole_matrix, T_bare, T_erf_coulomb, damping_grad, T_erfc
 use mbd_geom, only: geom_t
 use mbd_gradients, only: grad_t, grad_matrix_re_t, grad_request_t, grad_scalar_t
@@ -184,6 +184,41 @@ subroutine test_T_fermi_deriv_impl()
     diff = (T_diff_num(:, :, 0) - dT%dvdw) / T_diff_num(:, :, 0)
     if (failed(maxval(abs(diff)), 1d-10)) then
         call print_matrix('delta dTfermi', diff)
+    end if
+end subroutine
+
+subroutine test_T_sqrtfermi_deriv_impl()
+    real(dp) :: r(3), T(3, 3), T0(3, 3), &
+        diff(3, 3), T_diff_num(3, 3, -3:3), delta, rvdw, rvdw_diff, f
+    type(grad_matrix_re_t) :: dT, dT0
+    type(grad_scalar_t) :: df
+    integer :: a, b, i_step
+
+    delta = 1d-3
+    r = [1.02d0, -2.22d0, 0.15d0]
+    rvdw = 2.5d0
+    f = damping_sqrtfermi(r, rvdw, 6d0, df, grad_request_t(dr_vdw=.true.))
+    T0 = T_bare(r)
+    T = damping_grad(f, df, T0, dT0, dT, grad_request_t(dr_vdw=.true.))
+    do i_step = -3, 3
+        if (i_step == 0) cycle
+        rvdw_diff = rvdw + i_step * delta
+        T_diff_num(:, :, i_step) = damping_sqrtfermi(r, rvdw_diff, 6d0) * T_bare(r)
+    end do
+#ifndef WITHOUT_DO_CONCURRENT
+    do concurrent(a=1:3, b=1:3)
+#else
+    do a = 1, 3
+    do b = 1, 3
+#endif
+        T_diff_num(a, b, 0) = diff7(T_diff_num(a, b, :), delta)
+    end do
+#ifdef WITHOUT_DO_CONCURRENT
+    end do
+#endif
+    diff = (T_diff_num(:, :, 0) - dT%dvdw) / T_diff_num(:, :, 0)
+    if (failed(maxval(abs(diff)), 1d-10)) then
+        call print_matrix('delta dTsqrtfermi', diff)
     end if
 end subroutine
 

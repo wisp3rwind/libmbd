@@ -62,12 +62,24 @@ real(dp) function damping_fermi(r, s_vdw, d, df, grad) result(f)
     if (grad%dr_vdw) df%dvdw = -pre * r_1 / s_vdw**2
 end function
 
-real(dp) function damping_sqrtfermi(r, s_vdw, d) result(f)
+real(dp) function damping_sqrtfermi(r, s_vdw, d, df, grad) result(f)
     real(dp), intent(in) :: r(3)
     real(dp), intent(in) :: s_vdw
     real(dp), intent(in) :: d
+    type(grad_scalar_t), intent(out), optional :: df
+    type(grad_request_t), intent(in), optional :: grad
 
-    f = sqrt(damping_fermi(r, s_vdw, d))
+    real(dp) :: pre, eta, r_1, e, ffermi
+
+    r_1 = sqrt(sum(r**2))
+    eta = r_1 / s_vdw
+    e = exp(-d * (eta - 1))
+    ffermi = 1d0 / (1 + e)
+    f = sqrt(ffermi)
+    if (.not. present(grad)) return
+    pre = 0.5 * d * ffermi * f * e
+    if (grad%dcoords) df%dr = pre * r / (r_1 * s_vdw)
+    if (grad%dr_vdw) df%dvdw = -pre * r_1 / s_vdw**2
 end function
 
 subroutine op1minus_grad(f, df)
