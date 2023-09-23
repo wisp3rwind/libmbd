@@ -109,7 +109,7 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
     real(dp) :: Rn(3), Rnij(3), Rnij_norm, T(3, 3), f_damp, &
         sigma_ij, T0(3, 3), beta_R_vdw
     integer :: i_atom, j_atom, i_cell, n(3), range_n(3), i, j, &
-        n_atoms, my_i_atom, my_j_atom, i_latt, my_nr, my_nc
+        my_i_atom, my_j_atom, i_latt, my_nr, my_nc
     logical :: do_ewald, is_periodic
     type(grad_matrix_re_t) :: dT, dT0, dTew
     type(grad_scalar_t) :: df
@@ -122,23 +122,27 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
     type(grad_matrix_cplx_t) :: dTij
 #endif
 
-    do_ewald = .false.
-    is_periodic = allocated(geom%lattice)
-    n_atoms = geom%siz()
-    if (present(grad)) then
-        grad_ij = grad
-        grad_ij%dcoords = grad%dcoords .or. grad%dlattice
-    end if
+    ! Allocate dipole matrix
 #ifdef WITH_SCALAPACK
     call dipmat%init(geom%idx, geom%blacs)
 #else
     call dipmat%init(geom%idx)
 #endif
+
+    ! Check & prepare periodic calculation
+    do_ewald = .false.
+    is_periodic = allocated(geom%lattice)
     if (is_periodic) then
         do_ewald = geom%gamm > 0d0
         range_n = supercell_circum(geom%lattice, geom%real_space_cutoff)
     else
         range_n(:) = 0
+    end if
+
+    ! Prepare gradient arrays
+    if (present(grad)) then
+        grad_ij = grad
+        grad_ij%dcoords = grad%dcoords .or. grad%dlattice
     end if
     if (grad_ij%dcoords) allocate (dTij%dr(3, 3, 3))
     my_nr = size(dipmat%idx%i_atom)
@@ -164,22 +168,29 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
         end if
 #endif
     end if
+
+    ! Build dipole matrix, including real-space summation if periodic
     call geom%clock(11)
     n = [0, 0, -1]
     each_cell: do i_cell = 1, product(1 + 2 * range_n)
         call shift_idx(n, -range_n, range_n)
+
         if (is_periodic) then
             Rn = matmul(geom%lattice, n)
         else
             Rn(:) = 0d0
         end if
+
         each_atom: do my_i_atom = 1, size(dipmat%idx%i_atom)
             i_atom = dipmat%idx%i_atom(my_i_atom)
             each_atom_pair: do my_j_atom = 1, size(dipmat%idx%j_atom)
                 j_atom = dipmat%idx%j_atom(my_j_atom)
+
+                ! i_cell == 1 => n = [0, 0, 0] => (i == j both atoms identical)
                 if (i_cell == 1) then
                     if (i_atom == j_atom) cycle
                 end if
+
                 Rnij = geom%coords(:, i_atom) - geom%coords(:, j_atom) - Rn
                 Rnij_norm = sqrt(sum(Rnij**2))
                 if (is_periodic .and. Rnij_norm > geom%real_space_cutoff) cycle
@@ -190,6 +201,8 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
                     sigma_ij = damp%mayer_scaling &
                         * sqrt(sum(damp%sigma([i_atom, j_atom])**2))
                 end if
+
+                ! Evaluate i,j dipole interaction
                 select case (damp%version)
                     case ("bare")
                         T = T_bare(Rnij, dT, grad_ij%dcoords)
@@ -214,29 +227,38 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
                         call op1minus_grad(f_damp, df)
                         T0 = T_erf_coulomb(Rnij, sigma_ij, dT0, grad_ij)
                         T = damping_grad(f_damp, df, T0, dT0, dT, grad_ij)
+                        ! No Ewald summation for short-range interaction
                         do_ewald = .false.
                     case ("sqrtfermi,dip,gg")
                         f_damp = damping_sqrtfermi(Rnij, beta_R_vdw, damp%a, df, grad_ij)
                         call op1minus_grad(f_damp, df)
                         T0 = T_erf_coulomb(Rnij, sigma_ij, dT0, grad_ij)
                         T = damping_grad(f_damp, df, T0, dT0, dT, grad_ij)
+                        ! No Ewald summation for short-range interaction
                         do_ewald = .false.
                     case ("custom,dip,gg")
                         T = (1d0 - damp%damping_custom(i_atom, j_atom)) * &
                             T_erf_coulomb(Rnij, sigma_ij)
+                        ! No Ewald summation for short-range interaction
                         do_ewald = .false.
                 end select
                 if (grad_ij%dr_vdw) dT%dvdw = damp%beta * dT%dvdw
+
+                ! Cut off bare long-range interaction if using Ewald
                 if (do_ewald) then
                     T = T &
                         + T_erfc(Rnij, geom%gamm, dTew, grad_ij) &
                         - T_bare(Rnij, dT0, grad_ij%dcoords)
                     if (grad_ij%dcoords) dT%dr = dT%dr + dTew%dr - dT0%dr
                 end if
+
+                ! Copy over to potentially complex-valued tensor
                 Tij = T
                 if (grad_ij%dcoords) dTij%dr = dT%dr
                 if (grad_ij%dr_vdw) dTij%dvdw = dT%dvdw
                 if (grad_ij%dsigma) dTij%dsigma = dT%dsigma
+
+                ! Multiply exp(-i q * Rnij), update gradients accordingly
 #ifdef DO_COMPLEX_TYPE
                 exp_qR = exp(-IMI * (dot_product(q, Rnij)))
                 Tij = T * exp_qR
@@ -257,11 +279,15 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
                     end do
                 end if
 #endif
+
+                ! Store T
                 i = 3 * (my_i_atom - 1)
                 j = 3 * (my_j_atom - 1)
                 associate (T_sub => dipmat%val(i + 1:i + 3, j + 1:j + 3))
                     T_sub = T_sub + Tij
                 end associate
+
+                ! Store gradients
                 if (.not. present(grad)) cycle
                 if (grad%dcoords .and. i_atom /= j_atom) then
                     associate (dTdR_sub => ddipmat%dr(i + 1:i + 3, j + 1:j + 3, :))
@@ -297,7 +323,10 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
             end do each_atom_pair
         end do each_atom
     end do each_cell
+
     call geom%clock(-11)
+
+    ! Add long-range Ewald contributions
     if (do_ewald) then
 #ifndef DO_COMPLEX_TYPE
         call add_ewald_dipole_parts_real(geom, dipmat, ddipmat, grad)
@@ -448,8 +477,10 @@ subroutine add_ewald_dipole_parts_complex(geom, dipmat, ddipmat, grad, q)
             end do each_atom_pair
         end do each_atom
     end do each_recip_vec
+
     ! self energy
     call dipmat%add_diag_scalar(-4 * geom%gamm**3 / (3 * sqrt(pi)))
+
     ! surface term
 #ifdef DO_COMPLEX_TYPE
     do_surface = sqrt(sum(q**2)) < 1d-15
