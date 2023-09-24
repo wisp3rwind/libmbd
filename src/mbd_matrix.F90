@@ -229,6 +229,14 @@ subroutine matrix_cplx_add_diag(this, d)
 end subroutine
 
 #ifndef DO_COMPLEX_TYPE
+!! If only b is present, compute
+!! $$
+!! this_{ia,jb} = this_{ia,jb} * b[i] * b[j]
+!! $$
+!! if also c is given, compute
+!! $$
+!! this_{ia,jb} = this_{ia,jb} * (b[i] * c[j] + c[i] * b[j])
+!! $$
 subroutine matrix_re_mult_cross(this, b, c)
     class(matrix_re_t), intent(inout) :: this
 #else
@@ -397,6 +405,8 @@ complex(dp) function matrix_cplx_sum_all(this) result(res)
 #endif
 end function
 
+!! Contract a 3N x 3N matrix over rows or columns, yielding a 
+!! 3 x 3N or 3N x 3 matrix, respectively.
 #ifndef DO_COMPLEX_TYPE
 subroutine matrix_re_contract_n_transp(this, dir, res)
     class(matrix_re_t), intent(in) :: this
@@ -436,6 +446,12 @@ subroutine matrix_cplx_contract_n_transp(this, dir, res)
 #endif
 end subroutine
 
+!! $$
+!! res_j = -1/3 * (
+!!    sum_{ab} A_{ka,jb} * A'_{a,jb}
+!!    + sum_{ab} B'_{ja,b} * B_{ja,kb}
+!! )
+!! $$
 #ifndef DO_COMPLEX_TYPE
 function contract_cross_33_real(k_atom, A, A_prime, B, B_prime) result(res)
     type(matrix_re_t), intent(in) :: A, B
@@ -508,6 +524,9 @@ function matrix_cplx_contract_n33diag_cols(A) result(res)
 #endif
 end function
 
+!! $$
+!! res_i = \sum_{ajb} A_{ia,jb}
+!! $$
 #ifndef DO_COMPLEX_TYPE
 function matrix_re_contract_n33_rows(A) result(res)
     class(matrix_re_t), intent(in) :: A
