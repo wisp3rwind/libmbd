@@ -5,6 +5,7 @@ cmake_policy(SET CMP0077 NEW)
 set(CMAKE_USER_MAKE_RULES_OVERRIDE_Fortran
   "${CMAKE_CURRENT_SOURCE_DIR}/cmake/fortran_flags_override.cmake")
 
+
 project(libMBD
     DESCRIPTION "Many-body dispersion library"
     LANGUAGES Fortran C)
@@ -29,6 +30,8 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     message(STATUS "Setting build type to ${DEFAULT_BUILD_TYPE} as none was set")
     set(CMAKE_BUILD_TYPE "${DEFAULT_BUILD_TYPE}")
 endif()
+
+string(REPLACE "-O2" "-O3" CMAKE_Fortran_FLAGS_RELWITHDEBINFO "${CMAKE_Fortran_FLAGS_RELWITHDEBINFO}")
 
 if(NOT TARGET LAPACK::LAPACK)
     find_package(LAPACK REQUIRED)
