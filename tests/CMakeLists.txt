@@ -1,6 +1,7 @@
 add_executable(mbd_grad_tests mbd_grad_tests.F90 mbd_grad_test_cases.F90)
 add_executable(mbd_api_tests mbd_api_tests.F90)
-foreach(TEST_APP mbd_grad_tests mbd_api_tests)
+add_executable(mbd_benchmark mbd_benchmark.F90 mbd_benches.F90)
+foreach(TEST_APP mbd_grad_tests mbd_api_tests mbd_benchmark)
     target_include_directories(${TEST_APP} PRIVATE $<TARGET_FILE_DIR:mbd>)
     target_link_libraries(${TEST_APP} PRIVATE mbd)
     if(ENABLE_SCALAPACK_MPI)

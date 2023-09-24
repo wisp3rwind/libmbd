@@ -87,6 +87,7 @@ type, public :: clock_t
     procedure :: init => clock_init
     procedure :: clock => clock_clock
     procedure :: print => clock_print
+    procedure :: print_csv => clock_print_csv
 end type
 
 type, public :: quad_pt_t
@@ -268,6 +269,57 @@ subroutine clock_print(this)
         print '(I5,I7,"  ",A20,I10,F16.6)', i, this%levels(i), label, this%counts(i), &
             dble(this%timestamps(i)) / rate
     end do
+end subroutine
+
+subroutine clock_print_csv(this, fname)
+    class(clock_t), intent(inout) :: this
+    character(len=*), intent(in) :: fname
+
+    integer(i8) :: cnt, rate, cnt_max
+    integer :: i, u
+    character(len=20) :: label
+
+#ifdef WITH_MPI
+    if (mpi_get_rank() /= 0) return
+#endif
+    call system_clock(cnt, rate, cnt_max)
+
+    open (file=fname, newunit=u, action="write", status="replace")
+
+    write (u, '("id,level,label,count,time (s)")')
+    do i = 1, size(this%counts)
+        if (this%counts(i) == 0) cycle
+        select case (i)
+        case (11); label = 'dipmat real'
+        case (12); label = 'dipmat rec'
+        case (13); label = 'P_EVR'
+        case (14); label = 'mmul'
+        case (15); label = 'force contractions'
+        case (16); label = 'PDGETRF'
+        case (17); label = 'PDGETRI'
+        case (18); label = 'ELSI ev'
+        case (20); label = 'MBD dipole'
+        case (21); label = 'MBD eig'
+        case (22); label = 'MBD forces'
+        case (23); label = 'RPA eig'
+        case (30); label = 'SCS dipole'
+        case (32); label = 'SCS inv'
+        case (33); label = 'SCS forces'
+        case (50); label = 'SCS'
+        case (51); label = 'MBD k-point'
+        case (52); label = 'MBD'
+        case (90); label = 'MBD@rsSCS'
+        case (91); label = 'MBD@rsSCS forces'
+        case default
+            label = '('//trim(tostr(i))//')'
+        end select
+
+        write (u, '(I5,",",I7,",",A20,",",I10,",",F16.6)') &
+            i, this%levels(i), label, this%counts(i), &
+            dble(this%timestamps(i)) / rate
+    end do
+
+    close (u)
 end subroutine
 
 subroutine printer(str)
