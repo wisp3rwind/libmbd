@@ -34,4 +34,16 @@ real(dp), parameter :: ZERO_REAL = 0d0
 complex(dp), parameter :: ZERO_COMPLEX = (0d0, 0d0)
 complex(dp), parameter :: IMI = (0d0, 1d0)
 
+integer, parameter :: DAMPING_UNKNOWN = 0
+integer, parameter :: DAMPING_BARE = 1
+integer, parameter :: DAMPING_DIP_1MEXP = 2
+integer, parameter :: DAMPING_FERMI_DIP = 3
+integer, parameter :: DAMPING_SQRTFERMI_DIP = 4
+integer, parameter :: DAMPING_CUSTOM_DIP = 5
+integer, parameter :: DAMPING_DIP_CUSTOM = 6
+integer, parameter :: DAMPING_DIP_GG = 7
+integer, parameter :: DAMPING_FERMI_DIP_GG = 8
+integer, parameter :: DAMPING_SQRTFERMI_DIP_GG = 9
+integer, parameter :: DAMPING_CUSTOM_DIP_GG = 10
+
 end module

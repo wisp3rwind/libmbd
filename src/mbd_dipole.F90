@@ -15,12 +15,13 @@ use mbd_gradients, only: grad_t, grad_matrix_re_t, grad_matrix_cplx_t, &
     grad_scalar_t, grad_request_t
 use mbd_lapack, only: eigvals, inverse
 use mbd_linalg, only: outer
+use mbd_tensor, only: tensor_3x3_t, tensor_3x3_grad_scalar_t, tensor_3x3_grad_vector_t
 use mbd_utils, only: tostr, shift_idx
 
 implicit none
 
 private
-public :: dipole_matrix, T_bare, T_erf_coulomb, damping_grad, T_erfc, B_erfc, C_erfc
+public :: dipole_matrix, T_bare, T_erf_coulomb, damping_grad, T_erfc
 
 interface dipole_matrix
     !! Form either a real or a complex dipole matrix.
@@ -84,6 +85,36 @@ end interface
 
 contains
 
+function parse_damping_version(damp) result(version)
+    type(damping_t), intent(in) :: damp
+    integer :: version
+
+    select case (damp%version)
+        case ("bare")
+            version = DAMPING_BARE
+        case ("dip,1mexp")
+            version = DAMPING_DIP_1MEXP
+        case ("fermi,dip")
+            version = DAMPING_FERMI_DIP
+        case ("sqrtfermi,dip")
+            version = DAMPING_SQRTFERMI_DIP
+        case ("custom,dip")
+            version = DAMPING_CUSTOM_DIP
+        case ("dip,custom")
+            version = DAMPING_DIP_CUSTOM
+        case ("dip,gg")
+            version = DAMPING_DIP_GG
+        case ("fermi,dip,gg")
+            version = DAMPING_FERMI_DIP_GG
+        case ("sqrtfermi,dip,gg")
+            version = DAMPING_SQRTFERMI_DIP_GG
+        case ("custom,dip,gg")
+            version = DAMPING_CUSTOM_DIP_GG
+        case default
+            version = DAMPING_UNKNOWN
+    end select
+end function
+
 #endif
 
 #ifndef DO_COMPLEX_TYPE
@@ -109,7 +140,8 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
     real(dp) :: Rn(3), Rnij(3), Rnij_norm, T(3, 3), f_damp, &
         sigma_ij, T0(3, 3), beta_R_vdw
     integer :: i_atom, j_atom, i_cell, n(3), range_n(3), i, j, &
-        my_i_atom, my_j_atom, i_latt, my_nr, my_nc
+        my_i_atom, my_j_atom, i_latt, my_nr, my_nc, &
+        damping_version
     logical :: do_ewald, is_periodic
     type(grad_matrix_re_t) :: dT, dT0, dTew
     type(grad_scalar_t) :: df
@@ -118,6 +150,7 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
     real(dp) :: Tij(3, 3)
     type(grad_matrix_re_t) :: dTij
 #else
+    real(dp) :: qR
     complex(dp) :: Tij(3, 3), exp_qR
     type(grad_matrix_cplx_t) :: dTij
 #endif
@@ -144,12 +177,21 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
         grad_ij = grad
         grad_ij%dcoords = grad%dcoords .or. grad%dlattice
     end if
-    if (grad_ij%dcoords) allocate (dTij%dr(3, 3, 3))
+    if (grad_ij%dcoords) then
+        allocate (dTij%dr(3, 3, 3))
+        allocate (dT%dr(3, 3, 3))
+        allocate (dT0%dr(3, 3, 3))
+        allocate (dTew%dr(3, 3, 3))
+        allocate (df%dr(3))
+    end if
+    if (grad_ij%dr_vdw) allocate (dT%dvdw(3, 3), source=0d0)
     my_nr = size(dipmat%idx%i_atom)
     my_nc = size(dipmat%idx%j_atom)
     allocate (dipmat%val(3 * my_nr, 3 * my_nc), source=ZERO)
     if (present(grad)) then
-        if (grad%dcoords) allocate (ddipmat%dr(3 * my_nr, 3 * my_nc, 3), source=ZERO)
+        if (grad%dcoords) then
+            allocate (ddipmat%dr(3 * my_nr, 3 * my_nc, 3), source=ZERO)
+        end if
         if (grad%dlattice) then
             allocate (ddipmat%dlattice(3 * my_nr, 3 * my_nc, 3, 3), source=ZERO)
         end if
@@ -170,6 +212,7 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
     end if
 
     ! Build dipole matrix, including real-space summation if periodic
+    damping_version = parse_damping_version(damp)
     call geom%clock(11)
     n = [0, 0, -1]
     each_cell: do i_cell = 1, product(1 + 2 * range_n)
@@ -203,40 +246,40 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
                 end if
 
                 ! Evaluate i,j dipole interaction
-                select case (damp%version)
-                    case ("bare")
+                select case (damping_version)
+                    case (DAMPING_BARE)
                         T = T_bare(Rnij, dT, grad_ij%dcoords)
-                    case ("dip,1mexp")
+                    case (DAMPING_DIP_1MEXP)
                         T = T_1mexp_coulomb(Rnij, beta_R_vdw, damp%a)
-                    case ("fermi,dip")
+                    case (DAMPING_FERMI_DIP)
                         f_damp = damping_fermi(Rnij, beta_R_vdw, damp%a, df, grad_ij)
                         T0 = T_bare(Rnij, dT0, grad_ij%dcoords)
                         T = damping_grad(f_damp, df, T0, dT0, dT, grad_ij)
-                    case ("sqrtfermi,dip")
+                    case (DAMPING_SQRTFERMI_DIP)
                         f_damp = damping_sqrtfermi(Rnij, beta_R_vdw, damp%a, df, grad_ij)
                         T0 = T_bare(Rnij, dT0, grad_ij%dcoords)
                         T = damping_grad(f_damp, df, T0, dT0, dT, grad_ij)
-                    case ("custom,dip")
+                    case (DAMPING_CUSTOM_DIP)
                         T = damp%damping_custom(i_atom, j_atom) * T_bare(Rnij)
-                    case ("dip,custom")
+                    case (DAMPING_DIP_CUSTOM)
                         T = damp%potential_custom(:, :, i_atom, j_atom)
-                    case ("dip,gg")
+                    case (DAMPING_DIP_GG)
                         T = T_erf_coulomb(Rnij, sigma_ij, dT, grad_ij)
-                    case ("fermi,dip,gg")
+                    case (DAMPING_FERMI_DIP_GG)
                         f_damp = damping_fermi(Rnij, beta_R_vdw, damp%a, df, grad_ij)
                         call op1minus_grad(f_damp, df)
                         T0 = T_erf_coulomb(Rnij, sigma_ij, dT0, grad_ij)
                         T = damping_grad(f_damp, df, T0, dT0, dT, grad_ij)
                         ! No Ewald summation for short-range interaction
                         do_ewald = .false.
-                    case ("sqrtfermi,dip,gg")
+                    case (DAMPING_SQRTFERMI_DIP_GG)
                         f_damp = damping_sqrtfermi(Rnij, beta_R_vdw, damp%a, df, grad_ij)
                         call op1minus_grad(f_damp, df)
                         T0 = T_erf_coulomb(Rnij, sigma_ij, dT0, grad_ij)
                         T = damping_grad(f_damp, df, T0, dT0, dT, grad_ij)
                         ! No Ewald summation for short-range interaction
                         do_ewald = .false.
-                    case ("custom,dip,gg")
+                    case (DAMPING_CUSTOM_DIP_GG)
                         T = (1d0 - damp%damping_custom(i_atom, j_atom)) * &
                             T_erf_coulomb(Rnij, sigma_ij)
                         ! No Ewald summation for short-range interaction
@@ -246,10 +289,8 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
 
                 ! Cut off bare long-range interaction if using Ewald
                 if (do_ewald) then
-                    T = T &
-                        + T_erfc(Rnij, geom%gamm, dTew, grad_ij) &
-                        - T_bare(Rnij, dT0, grad_ij%dcoords)
-                    if (grad_ij%dcoords) dT%dr = dT%dr + dTew%dr - dT0%dr
+                    T = T + T_erfc_minus_bare(Rnij, geom%gamm, dTew, grad_ij)
+                    if (grad_ij%dcoords) dT%dr = dT%dr + dTew%dr
                 end if
 
                 ! Copy over to potentially complex-valued tensor
@@ -260,7 +301,8 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
 
                 ! Multiply exp(-i q * Rnij), update gradients accordingly
 #ifdef DO_COMPLEX_TYPE
-                exp_qR = exp(-IMI * (dot_product(q, Rnij)))
+                qR = dot_product(q, Rnij)
+                exp_qR = complex(cos(qR), -sin(qR))
                 Tij = T * exp_qR
                 if (grad_ij%dcoords) then
 #ifndef WITHOUT_DO_CONCURRENT
@@ -353,16 +395,16 @@ subroutine add_ewald_dipole_parts_complex(geom, dipmat, ddipmat, grad, q)
 
     logical :: do_surface
     real(dp) :: rec_latt(3, 3), volume, G(3), Rij(3), k(3), &
-        k_sq, G_Rij, latt_inv(3, 3), &
-        dGdA(3), dk_sqdA, dkk_dA(3, 3), vol_prefactor, &
-        k_otimes_k(3, 3), exp_k_sq_gamma, vol_kk_exp_ksq(3, 3)
+        k_sq, k_sq_inv, G_Rij, latt_inv(3, 3), &
+        dGdA(3), dk_sqdA, dkk_dA(3, 3), vol_prefactor, sin_GR, cos_GR, &
+        k_otimes_k(3, 3), exp_k_sq_gamma
     integer :: &
         i_atom, j_atom, i, j, i_xyz, m(3), i_m, &
         range_m(3), my_i_atom, my_j_atom, i_latt, a, b
 #ifndef DO_COMPLEX_TYPE
-    real(dp) :: Tij(3, 3), exp_GR, vol_exp
+    real(dp) :: exp_GR, iexp_GR
 #else
-    complex(dp) :: Tij(3, 3), exp_GR, vol_exp
+    complex(dp) :: exp_GR, iexp_GR
     integer :: c
     real(dp) :: dkk_dq(3, 3, 3)
 #endif
@@ -383,10 +425,12 @@ subroutine add_ewald_dipole_parts_complex(geom, dipmat, ddipmat, grad, q)
         k = G
 #endif
         k_sq = sum(k**2)
+        k_sq_inv = 1 / k_sq
         if (sqrt(k_sq) > geom%rec_space_cutoff .or. sqrt(k_sq) < 1d-15) cycle
+
         exp_k_sq_gamma = exp(-k_sq / (4 * geom%gamm**2))
         do concurrent(a=1:3, b=1:3)
-            k_otimes_k(a, b) = k(a) * k(b) / k_sq
+            k_otimes_k(a, b) = k(a) * k(b) * k_sq_inv
         end do
         each_atom: do my_i_atom = 1, size(dipmat%idx%i_atom)
             i_atom = dipmat%idx%i_atom(my_i_atom)
@@ -394,31 +438,28 @@ subroutine add_ewald_dipole_parts_complex(geom, dipmat, ddipmat, grad, q)
                 j_atom = dipmat%idx%j_atom(my_j_atom)
                 Rij = geom%coords(:, i_atom) - geom%coords(:, j_atom)
                 G_Rij = dot_product(G, Rij)
+                sin_GR = sin(G_Rij)
+                cos_GR = cos(G_Rij)
 #ifdef DO_COMPLEX_TYPE
-                exp_GR = exp(IMI * G_Rij)
+                exp_GR = complex(cos_GR, sin_GR)
+                iexp_GR = complex(-sin_GR, cos_GR)
 #else
-                exp_GR = cos(G_Rij)
+                exp_GR = cos_GR
+                iexp_GR = -sin_GR
 #endif
-                vol_kk_exp_ksq = vol_prefactor * k_otimes_k * exp_k_sq_gamma
-                Tij = vol_kk_exp_ksq * exp_GR
                 i = 3 * (my_i_atom - 1)
                 j = 3 * (my_j_atom - 1)
                 associate (T_sub => dipmat%val(i + 1:i + 3, j + 1:j + 3))
-                    T_sub = T_sub + Tij
+                    T_sub = T_sub + (vol_prefactor * exp_k_sq_gamma * exp_GR) * k_otimes_k
                 end associate
                 if (.not. present(grad)) cycle
-                vol_exp = vol_prefactor * exp_k_sq_gamma * exp_GR
                 if (grad%dcoords .and. i_atom /= j_atom) then
                     associate (dTdR_sub => ddipmat%dr(i + 1:i + 3, j + 1:j + 3, :))
                         ! TODO should be do-concurrent, but this crashes IBM XL
                         ! 16.1.1, see issue #16
                         do i_xyz = 1, 3
                             dTdR_sub(:, :, i_xyz) = dTdR_sub(:, :, i_xyz) &
-#ifdef DO_COMPLEX_TYPE
-                                + Tij * IMI * G(i_xyz)
-#else
-                                -vol_kk_exp_ksq * sin(G_Rij) * G(i_xyz)
-#endif
+                                + (vol_prefactor * exp_k_sq_gamma * G(i_xyz) * iexp_GR) * k_otimes_k
                         end do
                     end associate
                 end if
@@ -426,10 +467,9 @@ subroutine add_ewald_dipole_parts_complex(geom, dipmat, ddipmat, grad, q)
                     do i_latt = 1, 3
                         do i_xyz = 1, 3
                             dGdA = -latt_inv(i_latt, :) * G(i_xyz)
-                            dk_sqdA = 2 * dot_product(k, dGdA)
+                            dk_sqdA = dot_product(k, dGdA)
                             do concurrent(a=1:3, b=1:3)
-                                dkk_dA(a, b) = k(a) * dGdA(b) / k_sq &
-                                    - k(a) * k(b) * dk_sqdA / (2 * k_sq**2)
+                                dkk_dA(a, b) = k(a) * k_sq_inv * dGdA(b)
                             end do
                             dkk_dA = dkk_dA + transpose(dkk_dA)
                             ! Using associate here was causing weird seg faults
@@ -440,14 +480,12 @@ subroutine add_ewald_dipole_parts_complex(geom, dipmat, ddipmat, grad, q)
                             ! )
                             ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, i_latt, i_xyz) = &
                                 ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, i_latt, i_xyz) &
-                                - Tij * latt_inv(i_latt, i_xyz) &
-                                + vol_exp * dkk_dA &
-                                - Tij * dk_sqdA / (4 * geom%gamm**2) &
-#ifdef DO_COMPLEX_TYPE
-                                + Tij * IMI * dot_product(dGdA, Rij)
-#else
-                                -vol_kk_exp_ksq * sin(G_Rij) * dot_product(dGdA, Rij)
-#endif
+                                + vol_prefactor * exp_k_sq_gamma * ( &
+                                    - exp_GR * latt_inv(i_latt, i_xyz) &
+                                    - exp_GR * dk_sqdA * (1 + 1 / (2 * geom%gamm**2)) &
+                                    + iexp_GR * dot_product(dGdA, Rij) &
+                                ) * k_otimes_k &
+                                + vol_prefactor * exp_k_sq_gamma * exp_GR * dkk_dA
                             ! end associate
                         end do
                     end do
@@ -455,21 +493,21 @@ subroutine add_ewald_dipole_parts_complex(geom, dipmat, ddipmat, grad, q)
 #ifdef DO_COMPLEX_TYPE
                 if (grad%dq) then
                     do concurrent(a=1:3, b=1:3, c=1:3)
-                        dkk_dq(a, b, c) = -2 * k(a) * k(b) * k(c) / k_sq**2
+                        dkk_dq(a, b, c) = -2 * k(a) * k(b) * k(c) * k_sq_inv**2
                     end do
                     do concurrent(a=1:3, b=1:3)
-                        dkk_dq(b, a, a) = dkk_dq(b, a, a) + k(b) / k_sq
+                        dkk_dq(b, a, a) = dkk_dq(b, a, a) + k(b) * k_sq_inv
                     end do
                     do concurrent(a=1:3, b=1:3)
-                        dkk_dq(a, b, a) = dkk_dq(a, b, a) + k(b) / k_sq
+                        dkk_dq(a, b, a) = dkk_dq(a, b, a) + k(b) * k_sq_inv
                     end do
                     associate (dTdq_sub => ddipmat%dq(i + 1:i + 3, j + 1:j + 3, :))
-                        dTdq_sub = dTdq_sub + vol_exp * dkk_dq
+                        dTdq_sub = dTdq_sub + vol_prefactor * exp_k_sq_gamma * exp_GR * dkk_dq
                         ! TODO should be do-concurrent, but this crashes IBM XL
                         ! 16.1.1, see issue #16
                         do a = 1, 3
                             dTdq_sub(:, :, a) = dTdq_sub(:, :, a) &
-                                - Tij * k(a) / (2 * geom%gamm**2)
+                                - (1 / (2 * geom%gamm**2) * vol_prefactor * exp_k_sq_gamma * exp_GR) * k(a) * k_otimes_k
                         end do
                     end associate
                 end if
@@ -510,6 +548,117 @@ end subroutine
 #   define DO_COMPLEX_TYPE
 #   include "mbd_dipole.F90"
 
+function build_T(r, d_inv, B, C, D, request_dr, request_dparam, dr, dB, dC, dparam) result(T)
+    !! $$
+    !! T_{ab}(\mathbf r)=\frac{\partial^2}{\partial r_a\partial r_b}\frac1r=
+    !! \frac{-3r_ar_b+r^2\delta_{ab}}{r^5},\qquad
+    !! \frac{\partial T_{ab}(\mathbf r)}{\partial r_c}=-3\left(
+    !! \frac{r_a\delta_{bc}+r_b\delta_{ca}+r_c\delta_{ab}}{r^5}-
+    !! \frac{5r_ar_br_c}{r^7}
+    !! \right)
+    !! $$
+    real(dp), intent(in) :: r(3), d_inv, B, C, D
+    logical, intent(in) :: request_dr, request_dparam
+    real(dp), intent(in), optional :: dB, dC
+    real(dp), intent(out), optional :: dr(3, 3, 3), dparam(3, 3)
+    real(dp) :: T(3, 3)
+
+    real(dp) :: C_over_d
+    real(dp) :: ux, uy, uz
+    real(dp) :: xx, yy, zz, xy, xz, yz
+    real(dp) :: xxx, yyy, zzz, yxx, yyx, zxx, zyy, zzx, zzy, xyz
+
+    ux = d_inv * r(1)
+    uy = d_inv * r(2)
+    uz = d_inv * r(3)
+
+    xx = C * ux**2 + B
+    yy = C * uy**2 + B
+    zz = C * uz**2 + B
+    xy = C * ux * uy
+    xz = C * ux * uz
+    yz = C * uy * uz
+
+    T(1, 1) = xx
+    T(1, 2) = xy
+    T(1, 3) = xz
+    T(2, 1) = xy
+    T(2, 2) = yy
+    T(2, 3) = yz
+    T(3, 1) = xz
+    T(3, 2) = yz
+    T(3, 3) = zz
+
+    if (request_dr .and. present(dr)) then
+        C_over_d = C * d_inv
+
+        ! Diagonal
+        xxx = ux * (3 * C_over_d + ux**2 * D)
+        yyy = uy * (3 * C_over_d + uy**2 * D)
+        zzz = uz * (3 * C_over_d + uz**2 * D)
+
+        ! Terms with two identical indices
+        yxx = uy * (C_over_d + ux**2 * D)
+        yyx = ux * (C_over_d + uy**2 * D)
+        zxx = uz * (C_over_d + ux**2 * D)
+        zyy = uz * (C_over_d + uy**2 * D)
+        zzx = ux * (C_over_d + uz**2 * D)
+        zzy = uy * (C_over_d + uz**2 * D)
+
+        ! Terms with all indices distinct
+        xyz = ux * uy * uz * D
+
+        dr(1, 1, 1) = xxx
+        dr(2, 1, 1) = yxx
+        dr(3, 1, 1) = zxx
+        dr(1, 2, 1) = yxx
+        dr(2, 2, 1) = yyx
+        dr(3, 2, 1) = xyz
+        dr(1, 3, 1) = zxx
+        dr(2, 3, 1) = xyz
+        dr(3, 3, 1) = zzx
+
+        dr(1, 1, 2) = yxx
+        dr(2, 1, 2) = yyx
+        dr(3, 1, 2) = xyz
+        dr(1, 2, 2) = yyx
+        dr(2, 2, 2) = yyy
+        dr(3, 2, 2) = zyy
+        dr(1, 3, 2) = xyz
+        dr(2, 3, 2) = zyy
+        dr(3, 3, 2) = zzy
+
+        dr(1, 1, 3) = zxx
+        dr(2, 1, 3) = xyz
+        dr(3, 1, 3) = zzx
+        dr(1, 2, 3) = xyz
+        dr(2, 2, 3) = zyy
+        dr(3, 2, 3) = zzy
+        dr(1, 3, 3) = zzx
+        dr(2, 3, 3) = zzy
+        dr(3, 3, 3) = zzz
+    end if
+
+    if (request_dparam .and. present(dparam) .and. present(dB) .and. present(dC)) then
+        xx = dC * ux**2 + dB
+        yy = dC * uy**2 + dB
+        zz = dC * uz**2 + dB
+        xy = dC * ux * uy
+        xz = dC * ux * uz
+        yz = dC * uy * uz
+
+        dparam(1, 1) = xx
+        dparam(2, 1) = xy
+        dparam(3, 1) = xz
+        dparam(1, 2) = xy
+        dparam(2, 2) = yy
+        dparam(3, 2) = yz
+        dparam(1, 3) = xz
+        dparam(2, 3) = yz
+        dparam(3, 3) = zz
+    end if
+end function
+
 function T_bare(r, dT, grad) result(T)
     !! $$
     !! T_{ab}(\mathbf r)=\frac{\partial^2}{\partial r_a\partial r_b}\frac1r=
@@ -520,98 +669,19 @@ function T_bare(r, dT, grad) result(T)
     !! \right)
     !! $$
     real(dp), intent(in) :: r(3)
-    type(grad_matrix_re_t), intent(out), optional :: dT
+    type(grad_matrix_re_t), intent(inout), optional :: dT
     logical, intent(in), optional :: grad
     real(dp) :: T(3, 3)
 
-    integer :: a, b, c
-    real(dp) :: r_1, r_2, r_5, r_7
+    real(dp) :: d_inv, B, C, D
 
-    r_2 = sum(r**2)
-    r_1 = sqrt(r_2)
-    r_5 = r_1**5
-    do concurrent(a=1:3)
-        T(a, a) = (-3 * r(a)**2 + r_2) / r_5
-        do concurrent(b=a + 1:3)
-            T(a, b) = -3 * r(a) * r(b) / r_5
-            T(b, a) = T(a, b)
-        end do
-    end do
-    if (.not. present(grad)) return
-    if (.not. grad) return
-    allocate (dT%dr(3, 3, 3))
-    r_7 = r_1**7
-    do concurrent(a=1:3)
-        dT%dr(a, a, a) = -3 * (3 * r(a) / r_5 - 5 * r(a)**3 / r_7)
-        do concurrent(b=a + 1:3)
-            dT%dr(a, a, b) = -3 * (r(b) / r_5 - 5 * r(a)**2 * r(b) / r_7)
-            dT%dr(a, b, a) = dT%dr(a, a, b)
-            dT%dr(b, a, a) = dT%dr(a, a, b)
-            dT%dr(b, b, a) = -3 * (r(a) / r_5 - 5 * r(b)**2 * r(a) / r_7)
-            dT%dr(b, a, b) = dT%dr(b, b, a)
-            dT%dr(a, b, b) = dT%dr(b, b, a)
-            do concurrent(c=b + 1:3)
-                dT%dr(a, b, c) = 15 * r(a) * r(b) * r(c) / r_7
-                dT%dr(a, c, b) = dT%dr(a, b, c)
-                dT%dr(b, a, c) = dT%dr(a, b, c)
-                dT%dr(b, c, a) = dT%dr(a, b, c)
-                dT%dr(c, a, b) = dT%dr(a, b, c)
-                dT%dr(c, b, a) = dT%dr(a, b, c)
-            end do
-        end do
-    end do
-end function
+    d_inv = 1_dp / sqrt(sum(r**2))
 
-real(dp) function B_erfc(r, gamm, dB, grad) result(B)
-    !! $$
-    !! \begin{aligned}
-    !! B(R,\gamma)
-    !! &=\operatorname{erfc}(\gamma R)
-    !! +\frac{2\gamma R}{\sqrt\pi}\mathrm e^{-(\gamma R)^2}
-    !! \\ \partial B(R,\gamma)
-    !! &=-\frac4{\sqrt\pi}(\gamma R)^2\mathrm e^{-(\gamma R)^2}
-    !! (R\partial\gamma+\gamma\partial R)
-    !! \end{aligned}
-    !! $$
-    real(dp), intent(in) :: r
-    real(dp), intent(in) :: gamm
-    type(grad_scalar_t), intent(out), optional :: dB
-    type(grad_request_t), intent(in), optional :: grad
+    B = d_inv**3
+    C = -3 * B
+    D = 15 * d_inv * B
 
-    real(dp) :: tmp, gamma_r_sq
-
-    gamma_r_sq = (gamm * r)**2
-    B = (erfc(gamm * r) + (2 * gamm * r / sqrt(pi)) * exp(-gamma_r_sq))
-    if (.not. present(grad)) return
-    tmp = -4d0 / sqrt(pi) * gamma_r_sq * exp(-gamma_r_sq)
-    if (grad%dcoords) dB%dr_1 = tmp * gamm
-    if (grad%dgamma) dB%dgamma = tmp * r
-end function
-
-real(dp) function C_erfc(r, gamm, dC, grad) result(C)
-    !! $$
-    !! \begin{aligned}
-    !! C(r,\gamma)
-    !! &=3\operatorname{erfc}(\gamma R)
-    !! +\frac{2\gamma R}{\sqrt\pi}(3+2(\gamma R)^2)\mathrm e^{-(\gamma R)^2}
-    !! \\ \partial C(R,\gamma)
-    !! &=-\frac8{\sqrt\pi}(\gamma R)^4\mathrm e^{-(\gamma R)^2}
-    !! (R\partial\gamma+\gamma\partial R)
-    !! \end{aligned}
-    !! $$
-    real(dp), intent(in) :: r
-    real(dp), intent(in) :: gamm
-    type(grad_scalar_t), intent(out), optional :: dC
-    type(grad_request_t), intent(in), optional :: grad
-
-    real(dp) :: tmp, gamma_r_sq
-
-    gamma_r_sq = (gamm * r)**2
-    C = (3 * erfc(gamm * r) + (2 * gamm * r / sqrt(pi)) * (3d0 + 2 * gamma_r_sq) * exp(-gamma_r_sq))
-    if (.not. present(grad)) return
-    tmp = -8d0 / sqrt(pi) * gamma_r_sq**2 * exp(-gamma_r_sq)
-    if (grad%dcoords) dC%dr_1 = tmp * gamm
-    if (grad%dgamma) dC%dgamma = tmp * r
+    T = build_T(r, d_inv, B, C, D, grad, .false., dT%dr)
 end function
 
 function T_erfc(r, gamm, dT, grad) result(T)
@@ -633,77 +703,64 @@ function T_erfc(r, gamm, dT, grad) result(T)
     !! $$
     real(dp), intent(in) :: r(3)
     real(dp), intent(in) :: gamm
-    type(grad_matrix_re_t), intent(out), optional :: dT
+    type(grad_matrix_re_t), intent(inout), optional :: dT
     type(grad_request_t), intent(in), optional :: grad
     real(dp) :: T(3, 3)
 
-    integer :: a, b, c
-    real(dp) :: r_1, r_2, r_3, r_4, r_5, r_6, r_7, B_ew, C_ew
-    type(grad_scalar_t) :: dB, dC
+    real(dp) :: r_1, r_2, d_inv
+    real(dp) :: x, theta, rho, B, C, D, dB, dC
 
     r_2 = sum(r**2)
     r_1 = sqrt(r_2)
-    r_3 = r_1 * r_2
-    r_5 = r_3 * r_2
-    B_ew = B_erfc(r_1, gamm, dB, grad)
-    C_ew = C_erfc(r_1, gamm, dC, grad)
-    do concurrent(a=1:3)
-        T(a, a) = -C_ew * r(a)**2 / r_5 + B_ew / r_3
-        do concurrent(b=a + 1:3)
-            T(a, b) = -C_ew * r(a) * r(b) / r_5
-            T(b, a) = T(a, b)
-        end do
-    end do
-    if (.not. present(grad)) return
-    if (grad%dcoords) then
-        allocate (dT%dr(3, 3, 3))
-        r_7 = r_1**7
-        r_4 = r_2**2
-        r_6 = r_4 * r_2
-#ifndef WITHOUT_DO_CONCURRENT
-        do concurrent(c=1:3)
-#else
-        do c = 1, 3
-#endif
-            dT%dr(c, c, c) = &
-                -(2 * r(c) / r_5 - 5 * r(c)**3 / r_7) * C_ew - 3 * r(c) / r_5 * B_ew &
-                - r(c)**3 / r_6 * dC%dr_1 + r(c) / r_4 * dB%dr_1
-#ifndef WITHOUT_DO_CONCURRENT
-            do concurrent(a=1:3, a /= c)
-#else
-            do a = 1, 3
-                if (a == c) cycle
-#endif
-                dT%dr(a, c, c) = &
-                    -(r(a) / r_5 - 5 * r(a) * r(c)**2 / r_7) * C_ew &
-                    - r(a) * r(c)**2 / r_6 * dC%dr_1
-                dT%dr(c, a, c) = dT%dr(a, c, c)
-                dT%dr(a, a, c) = &
-                    5 * r(a)**2 * r(c) / r_7 * C_ew - 3 * r(c) / r_5 * B_ew &
-                    - r(a)**2 * r(c) / r_6 * dC%dr_1 + r(c) / r_4 * dB%dr_1
-#ifndef WITHOUT_DO_CONCURRENT
-                do concurrent(b=a + 1:3, b /= c)
-#else
-                do b = a + 1, 3
-                    if (b == c) cycle
-#endif
-                    dT%dr(a, b, c) = &
-                        5 * r(a) * r(b) * r(c) / r_7 * C_ew - r(a) * r(b) * r(c) / r_6 * dC%dr_1
-                    dT%dr(b, a, c) = dT%dr(a, b, c)
-                end do
-            end do
-        end do
-    end if
+    d_inv = 1_dp / r_1
+
+    x = gamm * r_1
+    theta = (2 / sqrt(pi)) * x * exp(-x**2)
+    B = d_inv**3 * (erfc(x) + theta)
+    rho = 2 * gamm**2 * theta
+    C = -3 * B - d_inv * rho
+    D = (2 * gamm**2 * rho - 5 * d_inv * C)
+
+    dB = 0_dp
+    dC = 0_dp
     if (grad%dgamma) then
-        allocate (dT%dgamma(3, 3))
-        do concurrent(a=1:3)
-            dT%dgamma(a, a) = -dC%dgamma * r(a)**2 / r_5 + dB%dgamma / r_3
-            do concurrent(b=a + 1:3)
-                dT%dgamma(a, b) = -dC%dgamma * r(a) * r(b) / r_5
-                dT%dgamma(b, a) = dT%dgamma(a, b)
-            end do
-        end do
+        dB = -2 * d_inv * gamm * theta
+        dC = -2 * x**2 * dB
     end if
+
+    T = build_T(r, d_inv, B, C, D, grad%dcoords, grad%dgamma, dT%dr, dB, dC, dT%dgamma)
+end function
+
+! FIXME: Add unit test to compare against T_erfc - T_bare
+function T_erfc_minus_bare(r, gamm, dT, grad) result(T)
+    real(dp), intent(in) :: r(3)
+    real(dp), intent(in) :: gamm
+    type(grad_matrix_re_t), intent(inout), optional :: dT
+    type(grad_request_t), intent(in), optional :: grad
+    real(dp) :: T(3, 3)
+
+    real(dp) :: r_1, r_2, d_inv
+    real(dp) :: x, theta, rho, B, C, D, dB, dC
+
+    r_2 = sum(r**2)
+    r_1 = sqrt(r_2)
+    d_inv = 1_dp / r_1
+
+    x = gamm * r_1
+    theta = (2 / sqrt(pi)) * x * exp(-x**2)
+    B = d_inv**3 * (erfc(x) + theta - 1)
+    rho = 2 * gamm**2 * theta
+    C = -3 * B - d_inv * rho
+    D = (2 * gamm**2 * rho - 5 * d_inv * C)
+
+    dB = 0_dp
+    dC = 0_dp
+    if (grad%dgamma) then
+        dB = -2 * d_inv * gamm * theta
+        dC = -2 * x**2 * dB
+    end if
+
+    T = build_T(r, d_inv, B, C, D, grad%dcoords, grad%dgamma, dT%dr, dB, dC, dT%dgamma)
 end function
 
 function T_erf_coulomb(r, sigma, dT, grad) result(T)
@@ -730,74 +787,89 @@ function T_erf_coulomb(r, sigma, dT, grad) result(T)
     !! $$
     real(dp), intent(in) :: r(3)
     real(dp), intent(in) :: sigma
-    type(grad_matrix_re_t), intent(out), optional :: dT
+    type(grad_matrix_re_t), intent(inout), optional :: dT
     type(grad_request_t), intent(in), optional :: grad
     real(dp) :: T(3, 3)
 
-    real(dp) :: theta, erf_theta, r_5, r_1, zeta, bare(3, 3)
-    type(grad_matrix_re_t) :: dbare
-    real(dp) :: tmp33(3, 3), tmp333(3, 3, 3), rr_r5(3, 3)
-    integer :: a, c
+    real(dp) :: r_1, d_inv, sigma_inv, x, theta, rho, B, C, D, dB, dC
 
-    bare = T_bare(r, dbare, grad%dcoords)
     r_1 = sqrt(sum(r**2))
-    r_5 = r_1**5
-    rr_r5 = outer(r, r) / r_5
-    zeta = r_1 / sigma
-    theta = 2 * zeta / sqrt(pi) * exp(-zeta**2)
-    erf_theta = erf(zeta) - theta
-    T = erf_theta * bare + 2 * (zeta**2) * theta * rr_r5
-    if (.not. present(grad)) return
-    tmp33 = 2 * zeta * theta * (bare + (3 - 2 * zeta**2) * rr_r5)
-    if (grad%dcoords) then
-        allocate (dT%dr(3, 3, 3))
-        do concurrent(c=1:3)
-            dT%dr(:, :, c) = tmp33 * r(c) / (r_1 * sigma)
-        end do
-        tmp333 = dbare%dr / 3
-        do concurrent(a=1:3, c=1:3)
-            tmp333(a, a, c) = tmp333(a, a, c) + r(c) / r_5
-        end do
-        dT%dr = dT%dr + erf_theta * dbare%dr - 2 * (zeta**2) * theta * tmp333
+    d_inv = 1_dp / r_1
+    sigma_inv = 1 / sigma
+
+    x = r_1 * sigma_inv
+    theta = (2 / sqrt(pi)) * x * exp(-x**2)
+    B = d_inv**3 * (erf(x) - theta)
+    rho = 2 * sigma_inv**2 * theta
+    C = -3 * B + d_inv * rho
+    D = -2 * sigma_inv**2 * rho - 5 * d_inv * C
+
+    dB = 0_dp
+    dC = 0_dp
+    if (grad%dsigma) then
+        dB = -2 * d_inv * sigma_inv**3 * theta
+        dC = -2 * x**2 * dB
     end if
-    if (grad%dsigma) dT%dsigma = -tmp33 * r_1 / sigma**2
+
+    T = build_T(r, d_inv, B, C, D, grad%dcoords, grad%dsigma, dT%dr, dB, dC, dT%dsigma)
 end function
 
-function T_1mexp_coulomb(rxyz, sigma, a) result(T)
-    real(dp), intent(in) :: rxyz(3), sigma, a
+function T_1mexp_coulomb(r, sigma, a, dT, grad) result(T)
+    real(dp), intent(in) :: r(3), sigma, a
+    type(grad_matrix_re_t), intent(inout), optional :: dT
+    type(grad_request_t), intent(in), optional :: grad
     real(dp) :: T(3, 3)
 
-    real(dp) :: r_sigma, zeta_1, zeta_2
+    real(dp) :: r_1, d_inv, x, B, C, D, tmp, dB, dC
 
-    r_sigma = (sqrt(sum(rxyz**2)) / sigma)**a
-    zeta_1 = 1d0 - exp(-r_sigma) - a * r_sigma * exp(-r_sigma)
-    zeta_2 = -r_sigma * a * exp(-r_sigma) * (1 + a * (-1 + r_sigma))
-    T = zeta_1 * T_bare(rxyz) - zeta_2 * outer(rxyz, rxyz) / sqrt(sum(rxyz**2))**5
+    r_1 = sqrt(sum(r**2))
+    d_inv = 1 / r_1
+
+    x = (r_1 / sigma)**a
+    B = -x * a * exp(-x) * d_inv**2
+    C = -B * (2 + a * (x - 1_dp))
+    D = B * d_inv * (8 + a * (6 * (x - 1) + a * (x**2 - 3 * x + 1)))
+
+    dB = 0_dp
+    dC = 0_dp
+    if (grad%dsigma) then
+        tmp = B * a * d_inv * x**(1 / a)
+        dB = tmp * (x - 1)
+        dC = -tmp * (2 * (x - 1) + a * (x**2 - 3 * x + 1))
+    end if
+
+    T = build_T(r, d_inv, B, C, D, grad%dcoords, grad%dsigma, dT%dr, dB, dC, dT%dsigma)
 end function
 
 function damping_grad(f, df, T, dT, dfT, grad) result(fT)
     real(dp), intent(in) :: f
     type(grad_scalar_t), intent(in) :: df
     real(dp), intent(in) :: T(3, 3)
-    type(grad_matrix_re_t), intent(in) :: dT
-    type(grad_matrix_re_t), intent(out) :: dfT
+    type(grad_matrix_re_t), intent(inout) :: dT
+    type(grad_matrix_re_t), intent(inout) :: dfT
     type(grad_request_t), intent(in) :: grad
     real(dp) :: fT(3, 3)
 
-    integer :: c
+    integer :: c, b, a
 
-    fT = f * T
+    do concurrent(c = 1:3, b = 1:3)
+        fT(b, c) = f * T(b, c)
+    end do
     if (grad%dcoords) then
-        allocate (dfT%dr(3, 3, 3), source=0d0)
+        dfT%dr = 0_dp
         if (allocated(df%dr)) then
-            do concurrent(c=1:3)
-                dfT%dr(:, :, c) = df%dr(c) * T
+            do concurrent(c = 1:3, b = 1:3, a = 1:3)
+                dfT%dr(a, b, c) = df%dr(c) * T(a, b)
             end do
         end if
-        if (allocated(dT%dr)) dfT%dr = dfT%dr + f * dT%dr
+        if (allocated(dT%dr)) then
+            do concurrent(c = 1:3, b = 1:3, a = 1:3)
+                dfT%dr(a, b, c) = dfT%dr(a, b, c) + f * dT%dr(a, b, c)
+            end do
+        end if
     end if
     if (grad%dr_vdw) then
-        allocate (dfT%dvdw(3, 3), source=0d0)
+        dfT%dvdw = 0_dp
         if (allocated(df%dvdw)) dfT%dvdw = df%dvdw * T
         if (allocated(dT%dvdw)) dfT%dvdw = dfT%dvdw + f * dT%dvdw
     end if
