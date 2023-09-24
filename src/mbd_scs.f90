@@ -110,6 +110,12 @@ function run_scs(geom, alpha, damp, dalpha_scs, grad) result(alpha_scs)
             call geom%clock(15)
             call dQ%contract_n_transp('C', B_prime)
             do i_atom = 1, n_atoms
+                ! even if i_atom not in geom%idx%i_atom, this
+                ! needs to be called since it contains a parallel
+                ! reduction and may contribute to other nodes.
+                ! -> Probably, this is also why the
+                ! i_atom loop + findval is used instead of directly
+                ! iterating idx%i_atom ?
                 grads_i = contract_cross_33( &
                     i_atom, dQ, alpha_prime, alpha_full, B_prime &
                 )
