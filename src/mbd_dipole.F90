@@ -194,6 +194,7 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
         end if
         if (grad%dlattice) then
             allocate (ddipmat%dlattice(3 * my_nr, 3 * my_nc, 3, 3), source=ZERO)
+            allocate (dTij%dlattice(3, 3, 3, 3))
         end if
         if (grad%dr_vdw) then
             allocate (ddipmat%dvdw(3 * my_nr, 3 * my_nc), source=ZERO)
@@ -321,6 +322,12 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
                     end do
                 end if
 #endif
+                if (grad%dlattice) then
+                     do i_latt = 1, 3
+                        dTij%dlattice(:, :, i_latt, :) = dTij%dlattice(:, :, i_latt, :) &
+                            - dTij%dr * (n(i_latt))
+                    end do
+                end if
 
                 ! Store T
                 i = 3 * (my_i_atom - 1)
@@ -337,13 +344,11 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
                     end associate
                 end if
                 if (grad%dlattice) then
-                     do i_latt = 1, 3
-                        associate ( &
-                            dTda_sub => ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, i_latt, :) &
-                        )
-                            dTda_sub = dTda_sub - dTij%dr * (n(i_latt))
-                        end associate
-                    end do
+                    associate ( &
+                        dTda_sub => ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, :, :) &
+                    )
+                        dTda_sub = dTda_sub + dTij%dlattice
+                    end associate
                 end if
                 if (grad%dr_vdw) then
                     associate (dTdRvdw_sub => ddipmat%dvdw(i + 1:i + 3, j + 1:j + 3))
