@@ -83,6 +83,16 @@ interface dipole_matrix
     module procedure dipole_matrix_complex
 end interface
 
+interface dipmat_assign
+    module procedure dipmat_assign_real
+    module procedure dipmat_assign_complex
+end interface
+
+interface dipmat_add_assign
+    module procedure dipmat_add_assign_real
+    module procedure dipmat_add_assign_complex
+end interface
+
 contains
 
 function parse_damping_version(damp) result(version)
@@ -137,9 +147,9 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
     real(dp), intent(in) :: q(3)
 #endif
 
-    real(dp) :: Rn(3), Rnij(3), Rnij_norm, T(3, 3), f_damp, &
+    real(dp) :: Rij(3), Rn(3), Rnij(3), Rnij_norm, T(3, 3), f_damp, &
         sigma_ij, T0(3, 3), beta_R_vdw
-    integer :: i_atom, j_atom, i_cell, n(3), range_n(3), i, j, &
+    integer :: i_atom, j_atom, i_cell, n(3), range_n(3), &
         my_i_atom, my_j_atom, i_latt, my_nr, my_nc, &
         damping_version
     logical :: do_ewald, is_periodic
@@ -147,11 +157,12 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
     type(grad_scalar_t) :: df
     type(grad_request_t) :: grad_ij
 #ifndef DO_COMPLEX_TYPE
-    real(dp) :: Tij(3, 3)
+    real(dp) :: Tij(3, 3), dTij_dr(3, 3, 3)
     type(grad_matrix_re_t) :: dTij
 #else
+    integer :: i
     real(dp) :: qR
-    complex(dp) :: Tij(3, 3), exp_qR
+    complex(dp) :: Tij(3, 3), exp_qR, dTij_dr(3, 3, 3)
     type(grad_matrix_cplx_t) :: dTij
 #endif
 
@@ -210,39 +221,53 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
 #endif
     end if
 
-    ! Build dipole matrix, including real-space summation if periodic
     damping_version = parse_damping_version(damp)
     call geom%clock(11)
-    n = [0, 0, -1]
-    each_cell: do i_cell = 1, product(1 + 2 * range_n)
-        call shift_idx(n, -range_n, range_n)
 
-        if (is_periodic) then
-            Rn = matmul(geom%lattice, n)
-        else
-            Rn(:) = 0d0
-        end if
+    ! Build dipole matrix, including real-space summation if periodic
+    each_atom: do my_i_atom = 1, size(dipmat%idx%i_atom)
+        i_atom = dipmat%idx%i_atom(my_i_atom)
+        each_atom_pair: do my_j_atom = 1, size(dipmat%idx%j_atom)
+            j_atom = dipmat%idx%j_atom(my_j_atom)
 
-        each_atom: do my_i_atom = 1, size(dipmat%idx%i_atom)
-            i_atom = dipmat%idx%i_atom(my_i_atom)
-            each_atom_pair: do my_j_atom = 1, size(dipmat%idx%j_atom)
-                j_atom = dipmat%idx%j_atom(my_j_atom)
+            Tij = 0_dp
+            if (present(grad)) then
+                if (grad_ij%dcoords) dTij%dr = 0_dp
+                if (grad%dlattice) dTij%dlattice = 0_dp
+                if (grad%dr_vdw) dTij%dvdw = 0_dp
+                if (grad%dsigma) dTij%dsigma = 0_dp
+#ifdef DO_COMPLEX_TYPE
+                if (grad%dq) dTij%dq = 0_dp
+#endif
+            end if
+
+            Rij = geom%coords(:, i_atom) - geom%coords(:, j_atom)
+
+            if (allocated(damp%R_vdw)) then
+                beta_R_vdw = damp%beta * sum(damp%R_vdw([i_atom, j_atom]))
+            end if
+            if (allocated(damp%sigma)) then
+                sigma_ij = damp%mayer_scaling &
+                    * sqrt(sum(damp%sigma([i_atom, j_atom])**2))
+            end if
+
+            n = [0, 0, -1]
+            each_cell: do i_cell = 1, product(1 + 2 * range_n)
+                call shift_idx(n, -range_n, range_n)
 
                 ! i_cell == 1 => n = [0, 0, 0] => (i == j both atoms identical)
-                if (i_cell == 1) then
-                    if (i_atom == j_atom) cycle
+                if (i_cell == 1 .and. i_atom == j_atom) cycle
+
+                if (is_periodic) then
+                    Rn = matmul(geom%lattice, n)
+                    Rnij = Rij - Rn
+                else
+                    Rnij = Rij
                 end if
 
-                Rnij = geom%coords(:, i_atom) - geom%coords(:, j_atom) - Rn
                 Rnij_norm = sqrt(sum(Rnij**2))
+
                 if (is_periodic .and. Rnij_norm > geom%real_space_cutoff) cycle
-                if (allocated(damp%R_vdw)) then
-                    beta_R_vdw = damp%beta * sum(damp%R_vdw([i_atom, j_atom]))
-                end if
-                if (allocated(damp%sigma)) then
-                    sigma_ij = damp%mayer_scaling &
-                        * sqrt(sum(damp%sigma([i_atom, j_atom])**2))
-                end if
 
                 ! Evaluate i,j dipole interaction
                 select case (damping_version)
@@ -293,81 +318,41 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
                 end if
 
                 ! Copy over to potentially complex-valued tensor
-                Tij = T
-                if (grad_ij%dcoords) dTij%dr = dT%dr
-                if (grad_ij%dr_vdw) dTij%dvdw = dT%dvdw
-                if (grad_ij%dsigma) dTij%dsigma = dT%dsigma
-
-                ! Multiply exp(-i q * Rnij), update gradients accordingly
 #ifdef DO_COMPLEX_TYPE
+                ! Multiply exp(-i q * Rnij), update gradients accordingly
                 qR = dot_product(q, Rnij)
                 exp_qR = complex(cos(qR), -sin(qR))
-                Tij = T * exp_qR
+                Tij = Tij + T * exp_qR
                 if (grad_ij%dcoords) then
-#ifndef WITHOUT_DO_CONCURRENT
                     do concurrent(i=1:3)
-#else
-                    do i = 1, 3
-#endif
-                        dTij%dr(:, :, i) = dT%dr(:, :, i) * exp_qR - IMI * q(i) * Tij
+                        dTij_dr(:, :, i) = dT%dr(:, :, i) * exp_qR - IMI * q(i) * exp_qR * T
                     end do
                 end if
-                if (grad_ij%dsigma) dTij%dsigma = dT%dsigma * exp_qR
-                if (grad_ij%dr_vdw) dTij%dvdw = dT%dvdw * exp_qR
+                if (grad_ij%dr_vdw) dTij%dvdw = dTij%dvdw + dT%dvdw * exp_qR
+                if (grad_ij%dsigma) dTij%dsigma = dTij%dsigma + dT%dsigma * exp_qR
                 if (grad_ij%dq) then
                     do concurrent(i=1:3)
-                        dTij%dq(:, :, i) = -IMI * Rnij(i) * Tij
+                        dTij%dq(:, :, i) = dTij%dq(:, :, i) - IMI * Rnij(i) * exp_qR * T
                     end do
                 end if
+#else
+                Tij = Tij + T
+                if (grad_ij%dcoords) dTij_dr = dT%dr
+                if (grad_ij%dr_vdw) dTij%dvdw = dTij%dvdw + dT%dvdw
+                if (grad_ij%dsigma) dTij%dsigma = dTij%dsigma + dT%dsigma
 #endif
                 if (grad%dlattice) then
                      do i_latt = 1, 3
-                        dTij%dlattice(:, :, i_latt, :) = dTij%dlattice(:, :, i_latt, :) &
-                            - dTij%dr * (n(i_latt))
+                        dTij%dlattice(:, :, i_latt, :) = &
+                            dTij%dlattice(:, :, i_latt, :) - dTij_dr * (n(i_latt))
                     end do
                 end if
+                if (grad_ij%dcoords) dTij%dr = dTij%dr + dTij_dr
+            end do each_cell
 
-                ! Store T
-                i = 3 * (my_i_atom - 1)
-                j = 3 * (my_j_atom - 1)
-                associate (T_sub => dipmat%val(i + 1:i + 3, j + 1:j + 3))
-                    T_sub = T_sub + Tij
-                end associate
-
-                ! Store gradients
-                if (.not. present(grad)) cycle
-                if (grad%dcoords .and. i_atom /= j_atom) then
-                    associate (dTdR_sub => ddipmat%dr(i + 1:i + 3, j + 1:j + 3, :))
-                        dTdR_sub = dTdR_sub + dTij%dr
-                    end associate
-                end if
-                if (grad%dlattice) then
-                    associate ( &
-                        dTda_sub => ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, :, :) &
-                    )
-                        dTda_sub = dTda_sub + dTij%dlattice
-                    end associate
-                end if
-                if (grad%dr_vdw) then
-                    associate (dTdRvdw_sub => ddipmat%dvdw(i + 1:i + 3, j + 1:j + 3))
-                        dTdRvdw_sub = dTdRvdw_sub + dTij%dvdw
-                    end associate
-                end if
-                if (grad%dsigma) then
-                    associate (dTdsigma_sub => ddipmat%dsigma(i + 1:i + 3, j + 1:j + 3))
-                        dTdsigma_sub = dTdsigma_sub + dTij%dsigma
-                    end associate
-                end if
-#ifdef DO_COMPLEX_TYPE
-                if (grad%dq) then
-                    associate (dTdq_sub => ddipmat%dq(i + 1:i + 3, j + 1:j + 3, :))
-                        dTdq_sub = dTdq_sub + dTij%dq
-                    end associate
-                end if
-#endif
-            end do each_atom_pair
-        end do each_atom
-    end do each_cell
+            call dipmat_assign(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad)
+        end do each_atom_pair
+    end do each_atom
 
     call geom%clock(-11)
 
@@ -402,24 +387,58 @@ subroutine add_ewald_dipole_parts_complex(geom, dipmat, ddipmat, grad, q)
         dGdA(3), dk_sqdA, dkk_dA(3, 3), vol_prefactor, sin_GR, cos_GR, &
         k_otimes_k(3, 3), exp_k_sq_gamma
     integer :: &
-        i_atom, j_atom, i, j, i_xyz, m(3), i_m, &
+        i_atom, j_atom, i_xyz, m(3), i_m, &
         range_m(3), my_i_atom, my_j_atom, i_latt, a, b
 #ifndef DO_COMPLEX_TYPE
-    real(dp) :: exp_GR, iexp_GR
+    real(dp) :: exp_GR, miexp_GR
+    real(dp) :: Tij(3, 3)
+    type(grad_matrix_re_t) :: dTij
 #else
-    complex(dp) :: exp_GR, iexp_GR
+    complex(dp) :: exp_GR, miexp_GR
     integer :: c
     real(dp) :: dkk_dq(3, 3, 3)
+    complex(dp) :: Tij(3, 3)
+    type(grad_matrix_cplx_t) :: dTij
+#endif
+    type(grad_request_t) :: grad_ew
+    integer :: recip_count
+    real(dp), allocatable :: recip_vecs(:, :)
+
+    call geom%clock(12)
+
+    ! Prepare gradient arrays
+    if (present(grad)) then
+        grad_ew = grad
+        grad_ew%dr_vdw = .false.
+        grad_ew%dsigma = .false.
+        if (grad%dcoords) then
+            allocate (dTij%dr(3, 3, 3))
+        end if
+        if (grad%dlattice) then
+            allocate (dTij%dlattice(3, 3, 3, 3))
+        end if
+#ifdef DO_COMPLEX_TYPE
+        if (grad%dq) then
+            allocate (dTij%dq(3, 3, 3))
+        end if
+#endif
+    end if
+
+    ! Add surface term?
+#ifdef DO_COMPLEX_TYPE
+    do_surface = sqrt(sum(q**2)) < 1d-15
+#else
+    do_surface = .true.
 #endif
 
+    ! Hoist filtering of reciprocal lattice vectors out of the loops
     latt_inv = inverse(geom%lattice)
     rec_latt = 2 * pi * transpose(latt_inv)
-    volume = abs(dble(product(eigvals(geom%lattice))))
-    vol_prefactor = 4 * pi / volume
     range_m = supercell_circum(rec_latt, geom%rec_space_cutoff)
-    call geom%clock(12)
+    allocate(recip_vecs(3, product(1 + 2 * range_m)))
     m = [0, 0, -1]
-    each_recip_vec: do i_m = 1, product(1 + 2 * range_m)
+    recip_count = 0
+    do i_m = 1, product(1 + 2 * range_m)
         call shift_idx(m, -range_m, range_m)
         G = matmul(rec_latt, m)
 #ifdef DO_COMPLEX_TYPE
@@ -430,121 +449,249 @@ subroutine add_ewald_dipole_parts_complex(geom, dipmat, ddipmat, grad, q)
         k_sq = sum(k**2)
         k_sq_inv = 1 / k_sq
         if (sqrt(k_sq) > geom%rec_space_cutoff .or. sqrt(k_sq) < 1d-15) cycle
+        recip_count = recip_count + 1
+        recip_vecs(:, recip_count) = G
+    end do
 
-        exp_k_sq_gamma = exp(-k_sq / (4 * geom%gamm**2))
-        do concurrent(a=1:3, b=1:3)
-            k_otimes_k(a, b) = k(a) * k(b) * k_sq_inv
-        end do
-        each_atom: do my_i_atom = 1, size(dipmat%idx%i_atom)
-            i_atom = dipmat%idx%i_atom(my_i_atom)
-            each_atom_pair: do my_j_atom = 1, size(dipmat%idx%j_atom)
-                j_atom = dipmat%idx%j_atom(my_j_atom)
-                Rij = geom%coords(:, i_atom) - geom%coords(:, j_atom)
+    volume = abs(dble(product(eigvals(geom%lattice))))
+    vol_prefactor = 4 * pi / volume
+
+    each_atom: do my_i_atom = 1, size(dipmat%idx%i_atom)
+        i_atom = dipmat%idx%i_atom(my_i_atom)
+        each_atom_pair: do my_j_atom = 1, size(dipmat%idx%j_atom)
+            j_atom = dipmat%idx%j_atom(my_j_atom)
+
+            Tij = 0_dp
+            if (present(grad)) then
+                if (grad%dcoords) dTij%dR = 0_dp
+                if (grad%dlattice) dTij%dlattice = 0_dp
+#ifdef DO_COMPLEX_TYPE
+                if (grad%dq) dTij%dq = 0_dp
+#endif
+            end if
+
+            ! self energy
+            if (i_atom == j_atom) then
+                do i_xyz = 1, 3
+                    Tij(i_xyz, i_xyz) = -4 * geom%gamm**3 / (3 * sqrt(pi))
+                end do
+            end if
+
+            ! surface term
+            if (do_surface) then
+                do i_xyz = 1, 3
+                    Tij(i_xyz, i_xyz) = Tij(i_xyz, i_xyz) + vol_prefactor / 3
+                end do
+            end if
+
+            Rij = geom%coords(:, i_atom) - geom%coords(:, j_atom)
+
+            m = [0, 0, -1]
+            each_recip_vec: do i_m = 1, recip_count
+                G = recip_vecs(:, i_m)
+#ifdef DO_COMPLEX_TYPE
+                k = G + q
+#else
+                k = G
+#endif
+                k_sq = sum(k**2)
+                k_sq_inv = 1 / k_sq
+                if (sqrt(k_sq) > geom%rec_space_cutoff .or. sqrt(k_sq) < 1d-15) cycle
+
+                exp_k_sq_gamma = vol_prefactor * exp(-k_sq / (4 * geom%gamm**2))
+                do concurrent(a=1:3, b=1:3)
+                    k_otimes_k(a, b) = k(a) * k(b) * k_sq_inv
+                end do
+
                 G_Rij = dot_product(G, Rij)
                 sin_GR = sin(G_Rij)
                 cos_GR = cos(G_Rij)
 #ifdef DO_COMPLEX_TYPE
-                exp_GR = complex(cos_GR, sin_GR)
-                iexp_GR = complex(-sin_GR, cos_GR)
+                exp_GR = complex(cos_GR, -sin_GR)  ! = exp(-i G R)
+                miexp_GR = complex(-sin_GR, -cos_GR)  ! = -i * exp_GR
 #else
                 exp_GR = cos_GR
-                iexp_GR = -sin_GR
+                miexp_GR = -sin_GR
 #endif
-                i = 3 * (my_i_atom - 1)
-                j = 3 * (my_j_atom - 1)
-                associate (T_sub => dipmat%val(i + 1:i + 3, j + 1:j + 3))
-                    T_sub = T_sub + (vol_prefactor * exp_k_sq_gamma * exp_GR) * k_otimes_k
-                end associate
-                if (.not. present(grad)) cycle
-                if (grad%dcoords .and. i_atom /= j_atom) then
-                    associate (dTdR_sub => ddipmat%dr(i + 1:i + 3, j + 1:j + 3, :))
+                Tij = Tij + (exp_k_sq_gamma * exp_GR) * k_otimes_k
+
+                if (present(grad)) then
+                    if (grad%dcoords .and. i_atom /= j_atom) then
                         ! TODO should be do-concurrent, but this crashes IBM XL
                         ! 16.1.1, see issue #16
                         do i_xyz = 1, 3
-                            dTdR_sub(:, :, i_xyz) = dTdR_sub(:, :, i_xyz) &
-                                + (vol_prefactor * exp_k_sq_gamma * G(i_xyz) * iexp_GR) * k_otimes_k
+                            dTij%dr(:, :, i_xyz) = dTij%dr(:, :, i_xyz) &
+                                + (exp_k_sq_gamma * G(i_xyz) * miexp_GR) * k_otimes_k
                         end do
-                    end associate
-                end if
-                if (grad%dlattice) then
-                    do i_latt = 1, 3
-                        do i_xyz = 1, 3
-                            dGdA = -latt_inv(i_latt, :) * G(i_xyz)
-                            dk_sqdA = dot_product(k, dGdA)
-                            do concurrent(a=1:3, b=1:3)
-                                dkk_dA(a, b) = k(a) * k_sq_inv * dGdA(b)
+                    end if
+                    if (grad%dlattice) then
+                        do i_latt = 1, 3
+                            do i_xyz = 1, 3
+                                dGdA = -latt_inv(i_latt, :) * G(i_xyz)
+                                dk_sqdA = dot_product(k, dGdA)
+                                do concurrent(a=1:3, b=1:3)
+                                    dkk_dA(a, b) = k(a) * k_sq_inv * dGdA(b)
+                                end do
+                                dkk_dA = dkk_dA + transpose(dkk_dA)
+                                dTij%dlattice(:, :, i_latt, i_xyz) = &
+                                    dTij%dlattice(:, :, i_latt, i_xyz) &
+                                    + exp_k_sq_gamma * ( &
+                                        - exp_GR * latt_inv(i_latt, i_xyz) &
+                                        - exp_GR * dk_sqdA * (1 + 1 / (2 * geom%gamm**2)) &
+                                        + miexp_GR * dot_product(dGdA, Rij) &
+                                    ) * k_otimes_k &
+                                    + exp_k_sq_gamma * exp_GR * dkk_dA
                             end do
-                            dkk_dA = dkk_dA + transpose(dkk_dA)
-                            ! Using associate here was causing weird seg faults
-                            ! with some Intel compilers, reporting i_xyz being
-                            ! zero in the index, even though it printed as 1
-                            ! associate ( &
-                            !     dTda_sub => ddipmat%dlattice(i+1:i+3, j+1:j+3, i_latt, i_xyz) &
-                            ! )
-                            ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, i_latt, i_xyz) = &
-                                ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, i_latt, i_xyz) &
-                                + vol_prefactor * exp_k_sq_gamma * ( &
-                                    - exp_GR * latt_inv(i_latt, i_xyz) &
-                                    - exp_GR * dk_sqdA * (1 + 1 / (2 * geom%gamm**2)) &
-                                    + iexp_GR * dot_product(dGdA, Rij) &
-                                ) * k_otimes_k &
-                                + vol_prefactor * exp_k_sq_gamma * exp_GR * dkk_dA
-                            ! end associate
                         end do
-                    end do
-                end if
+                        if (do_surface) then
+                            do i_xyz = 1, 3
+                                dTij%dlattice(i_xyz, i_xyz, :, :) = &
+                                    dTij%dlattice(i_xyz, i_xyz, :, :) &
+                                    - vol_prefactor / 3 * latt_inv
+                            end do
+                        end if
+                    end if
 #ifdef DO_COMPLEX_TYPE
-                if (grad%dq) then
-                    do concurrent(a=1:3, b=1:3, c=1:3)
-                        dkk_dq(a, b, c) = -2 * k(a) * k(b) * k(c) * k_sq_inv**2
-                    end do
-                    do concurrent(a=1:3, b=1:3)
-                        dkk_dq(b, a, a) = dkk_dq(b, a, a) + k(b) * k_sq_inv
-                    end do
-                    do concurrent(a=1:3, b=1:3)
-                        dkk_dq(a, b, a) = dkk_dq(a, b, a) + k(b) * k_sq_inv
-                    end do
-                    associate (dTdq_sub => ddipmat%dq(i + 1:i + 3, j + 1:j + 3, :))
-                        dTdq_sub = dTdq_sub + vol_prefactor * exp_k_sq_gamma * exp_GR * dkk_dq
+                    if (grad%dq) then
+                        do concurrent(a=1:3, b=1:3, c=1:3)
+                            dkk_dq(a, b, c) = -2 * k(a) * k(b) * k(c) * k_sq_inv**2
+                        end do
+                        do concurrent(a=1:3, b=1:3)
+                            dkk_dq(b, a, a) = dkk_dq(b, a, a) + k(b) * k_sq_inv
+                        end do
+                        do concurrent(a=1:3, b=1:3)
+                            dkk_dq(a, b, a) = dkk_dq(a, b, a) + k(b) * k_sq_inv
+                        end do
+                        dTij%dq = dTij%dq + exp_k_sq_gamma * exp_GR * dkk_dq
                         ! TODO should be do-concurrent, but this crashes IBM XL
                         ! 16.1.1, see issue #16
                         do a = 1, 3
-                            dTdq_sub(:, :, a) = dTdq_sub(:, :, a) &
-                                - (1 / (2 * geom%gamm**2) * vol_prefactor * exp_k_sq_gamma * exp_GR) * k(a) * k_otimes_k
+                            dTij%dq(:, :, a) = dTij%dq(:, :, a) &
+                                - (1 / (2 * geom%gamm**2) * exp_k_sq_gamma * exp_GR) * k(a) * k_otimes_k
                         end do
-                    end associate
-                end if
-#endif
-            end do each_atom_pair
-        end do each_atom
-    end do each_recip_vec
-
-    ! self energy
-    call dipmat%add_diag_scalar(-4 * geom%gamm**3 / (3 * sqrt(pi)))
-
-    ! surface term
-#ifdef DO_COMPLEX_TYPE
-    do_surface = sqrt(sum(q**2)) < 1d-15
-#else
-    do_surface = .true.
-#endif
-    if (do_surface) then
-        do my_i_atom = 1, size(dipmat%idx%i_atom)
-            do my_j_atom = 1, size(dipmat%idx%j_atom)
-                do i_xyz = 1, 3
-                    i = 3 * (my_i_atom - 1) + i_xyz
-                    j = 3 * (my_j_atom - 1) + i_xyz
-                    dipmat%val(i, j) = dipmat%val(i, j) + vol_prefactor / 3
-                    if (.not. present(grad)) cycle
-                    if (grad%dlattice) then
-                        ddipmat%dlattice(i, j, :, :) = ddipmat%dlattice(i, j, :, :) &
-                            - vol_prefactor / 3 * latt_inv
                     end if
-                end do
-            end do
-        end do
-    end if
+#endif
+                end if
+
+            end do each_recip_vec
+
+            call dipmat_add_assign(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad_ew)
+        end do each_atom_pair
+    end do each_atom
+
     call geom%clock(-12)
+end subroutine
+
+#ifndef DO_COMPLEX_TYPE
+subroutine dipmat_assign_real(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad)
+    type(matrix_re_t), intent(inout) :: dipmat
+    type(grad_matrix_re_t), intent(inout), optional :: ddipmat
+    real(dp), intent(inout) :: Tij(3, 3)
+    type(grad_matrix_re_t), intent(inout) :: dTij
+#else
+subroutine dipmat_assign_complex(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad)
+    type(matrix_cplx_t), intent(inout) :: dipmat
+    type(grad_matrix_cplx_t), intent(inout), optional :: ddipmat
+    complex(dp), intent(inout) :: Tij(3, 3)
+    type(grad_matrix_cplx_t), intent(inout) :: dTij
+#endif
+    integer, intent(in) :: i_atom, j_atom, my_i_atom, my_j_atom
+    type(grad_request_t), intent(in), optional :: grad
+
+    integer :: i, j
+
+    ! Store T
+    i = 3 * (my_i_atom - 1)
+    j = 3 * (my_j_atom - 1)
+    dipmat%val(i + 1:i + 3, j + 1:j + 3) = Tij
+
+    ! Store gradients
+    if (.not. present(grad)) return
+
+    if (grad%dcoords .and. i_atom /= j_atom) then
+        ddipmat%dr(i + 1:i + 3, j + 1:j + 3, :) = dTij%dr
+    end if
+
+    if (grad%dlattice) then
+        ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, :, :) = dTij%dlattice
+    end if
+
+    if (grad%dr_vdw) then
+        ddipmat%dvdw(i + 1:i + 3, j + 1:j + 3) = dTij%dvdw
+    end if
+
+    if (grad%dsigma) then
+        ddipmat%dsigma(i + 1:i + 3, j + 1:j + 3) = dTij%dsigma
+    end if
+
+#ifdef DO_COMPLEX_TYPE
+    if (grad%dq) then
+        ddipmat%dq(i + 1:i + 3, j + 1:j + 3, :) = dTij%dq
+    end if
+#endif
+end subroutine
+
+#ifndef DO_COMPLEX_TYPE
+subroutine dipmat_add_assign_real(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad)
+    type(matrix_re_t), intent(inout) :: dipmat
+    type(grad_matrix_re_t), intent(inout), optional :: ddipmat
+    real(dp), intent(inout) :: Tij(3, 3)
+    type(grad_matrix_re_t), intent(inout) :: dTij
+#else
+subroutine dipmat_add_assign_complex(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad)
+    type(matrix_cplx_t), intent(inout) :: dipmat
+    type(grad_matrix_cplx_t), intent(inout), optional :: ddipmat
+    complex(dp), intent(inout) :: Tij(3, 3)
+    type(grad_matrix_cplx_t), intent(inout) :: dTij
+#endif
+    integer, intent(in) :: i_atom, j_atom, my_i_atom, my_j_atom
+    type(grad_request_t), intent(in), optional :: grad
+
+    integer :: i, j
+
+    ! Store T
+    i = 3 * (my_i_atom - 1)
+    j = 3 * (my_j_atom - 1)
+    associate (T_sub => dipmat%val(i + 1:i + 3, j + 1:j + 3))
+        T_sub = T_sub + Tij
+    end associate
+
+    ! Store gradients
+    if (.not. present(grad)) return
+
+    if (grad%dcoords .and. i_atom /= j_atom) then
+        associate (dTdR_sub => ddipmat%dr(i + 1:i + 3, j + 1:j + 3, :))
+            dTdR_sub = dTdR_sub + dTij%dr
+        end associate
+    end if
+
+    if (grad%dlattice) then
+        associate ( &
+            dTda_sub => ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, :, :) &
+        )
+            dTda_sub = dTda_sub + dTij%dlattice
+        end associate
+    end if
+
+    if (grad%dr_vdw) then
+        associate (dTdRvdw_sub => ddipmat%dvdw(i + 1:i + 3, j + 1:j + 3))
+            dTdRvdw_sub = dTdRvdw_sub + dTij%dvdw
+        end associate
+    end if
+
+    if (grad%dsigma) then
+        associate (dTdsigma_sub => ddipmat%dsigma(i + 1:i + 3, j + 1:j + 3))
+            dTdsigma_sub = dTdsigma_sub + dTij%dsigma
+        end associate
+    end if
+
+#ifdef DO_COMPLEX_TYPE
+    if (grad%dq) then
+        associate (dTdq_sub => ddipmat%dq(i + 1:i + 3, j + 1:j + 3, :))
+            dTdq_sub = dTdq_sub + dTij%dq
+        end associate
+    end if
+#endif
 end subroutine
 
 #ifndef DO_COMPLEX_TYPE
