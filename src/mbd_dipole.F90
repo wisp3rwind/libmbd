@@ -161,6 +161,9 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
 #else
     call dipmat%init(geom%idx)
 #endif
+    my_nr = size(dipmat%idx%i_atom)
+    my_nc = size(dipmat%idx%j_atom)
+    allocate (dipmat%val(3 * my_nr, 3 * my_nc), source=ZERO)
 
     ! Check & prepare periodic calculation
     do_ewald = .false.
@@ -176,19 +179,13 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
     if (present(grad)) then
         grad_ij = grad
         grad_ij%dcoords = grad%dcoords .or. grad%dlattice
-    end if
-    if (grad_ij%dcoords) then
-        allocate (dTij%dr(3, 3, 3))
-        allocate (dT%dr(3, 3, 3))
-        allocate (dT0%dr(3, 3, 3))
-        allocate (dTew%dr(3, 3, 3))
-        allocate (df%dr(3))
-    end if
-    if (grad_ij%dr_vdw) allocate (dT%dvdw(3, 3), source=0d0)
-    my_nr = size(dipmat%idx%i_atom)
-    my_nc = size(dipmat%idx%j_atom)
-    allocate (dipmat%val(3 * my_nr, 3 * my_nc), source=ZERO)
-    if (present(grad)) then
+        if (grad_ij%dcoords) then
+            allocate (dTij%dr(3, 3, 3))
+            allocate (dT%dr(3, 3, 3))
+            allocate (dT0%dr(3, 3, 3))
+            allocate (dTew%dr(3, 3, 3))
+            allocate (df%dr(3))
+        end if
         if (grad%dcoords) then
             allocate (ddipmat%dr(3 * my_nr, 3 * my_nc, 3), source=ZERO)
         end if
@@ -198,6 +195,7 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
         end if
         if (grad%dr_vdw) then
             allocate (ddipmat%dvdw(3 * my_nr, 3 * my_nc), source=ZERO)
+            allocate (dT%dvdw(3, 3), source=0d0)
             allocate (dTij%dvdw(3, 3))
         end if
         if (grad%dsigma) then
