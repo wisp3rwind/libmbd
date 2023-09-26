@@ -60,7 +60,7 @@ real(dp) function damping_fermi(r, s_vdw, d, df, grad) result(f)
     f = 1d0 / (1 + exp_x)
     if (.not. present(grad)) return
     pre = d / (2 + (exp_x + 1 / exp_x))
-    if (grad%dcoords) df%dr = pre * r / (r_1 * s_vdw)
+    if (grad%dcoords) df%dr = pre / (r_1 * s_vdw) * r
     if (grad%dr_vdw) df%dvdw = -pre * r_1 / s_vdw**2
 end function
 

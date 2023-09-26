@@ -12,10 +12,10 @@ use mbd_geom, only: geom_t, supercell_circum
 use mbd_damping, only: damping_t, damping_fermi, damping_sqrtfermi, &
     op1minus_grad
 use mbd_gradients, only: grad_t, grad_matrix_re_t, grad_matrix_cplx_t, &
-    grad_scalar_t, grad_request_t
+    grad_scalar_t, grad_request_t, grad_tensor_3x3_re_t, grad_tensor_3x3_cplx_t
 use mbd_lapack, only: eigvals, inverse
 use mbd_linalg, only: outer
-use mbd_tensor, only: tensor_3x3_t, tensor_3x3_grad_scalar_t, tensor_3x3_grad_vector_t
+use mbd_tensor
 use mbd_utils, only: tostr, shift_idx
 
 implicit none
@@ -147,23 +147,26 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
     real(dp), intent(in) :: q(3)
 #endif
 
-    real(dp) :: Rij(3), Rn(3), Rnij(3), Rnij_norm, T(3, 3), f_damp, &
-        sigma_ij, T0(3, 3), beta_R_vdw
-    integer :: i_atom, j_atom, i_cell, n(3), range_n(3), &
+    real(dp) :: Rij(3), Rn(3), Rnij(3), Rnij_norm, f_damp, &
+        sigma_ij, beta_R_vdw
+    type(tensor_3x3_re_t) :: T, T0
+    integer :: i, i_atom, j_atom, i_cell, n(3), range_n(3), &
         my_i_atom, my_j_atom, i_latt, my_nr, my_nc, &
         damping_version
     logical :: do_ewald, is_periodic
-    type(grad_matrix_re_t) :: dT, dT0, dTew
+    type(grad_tensor_3x3_re_t) :: dT, dT0, dTew
     type(grad_scalar_t) :: df
     type(grad_request_t) :: grad_ij
 #ifndef DO_COMPLEX_TYPE
-    real(dp) :: Tij(3, 3), dTij_dr(3, 3, 3)
-    type(grad_matrix_re_t) :: dTij
+    type(tensor_3x3_re_t) :: Tij
+    type(tensor_3x3_re_t) :: dTij_dr(3)
+    type(grad_tensor_3x3_re_t) :: dTij
 #else
-    integer :: i
     real(dp) :: qR
-    complex(dp) :: Tij(3, 3), exp_qR, dTij_dr(3, 3, 3)
-    type(grad_matrix_cplx_t) :: dTij
+    complex(dp) :: exp_qR
+    type(tensor_3x3_cplx_t) :: Tij
+    type(tensor_3x3_cplx_t) :: dTij_dr(3)
+    type(grad_tensor_3x3_cplx_t) :: dTij
 #endif
 
     ! Allocate dipole matrix
@@ -191,10 +194,10 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
         grad_ij = grad
         grad_ij%dcoords = grad%dcoords .or. grad%dlattice
         if (grad_ij%dcoords) then
-            allocate (dTij%dr(3, 3, 3))
-            allocate (dT%dr(3, 3, 3))
-            allocate (dT0%dr(3, 3, 3))
-            allocate (dTew%dr(3, 3, 3))
+            allocate (dTij%dr(3))
+            allocate (dT%dr(3))
+            allocate (dT0%dr(3))
+            allocate (dTew%dr(3))
             allocate (df%dr(3))
         end if
         if (grad%dcoords) then
@@ -202,21 +205,21 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
         end if
         if (grad%dlattice) then
             allocate (ddipmat%dlattice(3 * my_nr, 3 * my_nc, 3, 3), source=ZERO)
-            allocate (dTij%dlattice(3, 3, 3, 3))
+            allocate (dTij%dlattice(3, 3))
         end if
         if (grad%dr_vdw) then
             allocate (ddipmat%dvdw(3 * my_nr, 3 * my_nc), source=ZERO)
-            allocate (dT%dvdw(3, 3), source=0d0)
-            allocate (dTij%dvdw(3, 3))
+            allocate (dT%dvdw)
+            allocate (dTij%dvdw)
         end if
         if (grad%dsigma) then
             allocate (ddipmat%dsigma(3 * my_nr, 3 * my_nc), source=ZERO)
-            allocate (dTij%dsigma(3, 3))
+            allocate (dTij%dsigma)
         end if
 #ifdef DO_COMPLEX_TYPE
         if (grad%dq) then
             allocate (ddipmat%dq(3 * my_nr, 3 * my_nc, 3), source=ZERO)
-            allocate (dTij%dq(3, 3, 3))
+            allocate (dTij%dq(3))
         end if
 #endif
     end if
@@ -230,14 +233,28 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
         each_atom_pair: do my_j_atom = 1, size(dipmat%idx%j_atom)
             j_atom = dipmat%idx%j_atom(my_j_atom)
 
-            Tij = 0_dp
+            call Tij%clear()
             if (present(grad)) then
-                if (grad_ij%dcoords) dTij%dr = 0_dp
-                if (grad%dlattice) dTij%dlattice = 0_dp
-                if (grad%dr_vdw) dTij%dvdw = 0_dp
-                if (grad%dsigma) dTij%dsigma = 0_dp
+                if (grad_ij%dcoords) then
+                    do i = 1, 3
+                        call dTij%dr(i)%clear()
+                    end do
+                end if
+                if (grad%dlattice) then
+                    do i = 1, 3
+                        do i_latt = 1, 3
+                            call dTij%dlattice(i_latt, i)%clear()
+                        end do
+                    end do
+                end if
+                if (grad%dr_vdw) call dTij%dvdw%clear()
+                if (grad%dsigma) call dTij%dsigma%clear()
 #ifdef DO_COMPLEX_TYPE
-                if (grad%dq) dTij%dq = 0_dp
+                if (grad%dq) then
+                    do i = 1, 3
+                        call dTij%dq(i)%clear()
+                    end do
+                end if
 #endif
             end if
 
@@ -283,10 +300,10 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
                         f_damp = damping_sqrtfermi(Rnij, beta_R_vdw, damp%a, df, grad_ij)
                         T0 = T_bare(Rnij, dT0, grad_ij%dcoords)
                         T = damping_grad(f_damp, df, T0, dT0, dT, grad_ij)
-                    case (DAMPING_CUSTOM_DIP)
-                        T = damp%damping_custom(i_atom, j_atom) * T_bare(Rnij)
-                    case (DAMPING_DIP_CUSTOM)
-                        T = damp%potential_custom(:, :, i_atom, j_atom)
+                    !case (DAMPING_CUSTOM_DIP)
+                        !T = damp%damping_custom(i_atom, j_atom) * T_bare(Rnij)
+                    !case (DAMPING_DIP_CUSTOM)
+                        !T = damp%potential_custom(:, :, i_atom, j_atom)
                     case (DAMPING_DIP_GG)
                         T = T_erf_coulomb(Rnij, sigma_ij, dT, grad_ij)
                     case (DAMPING_FERMI_DIP_GG)
@@ -314,7 +331,11 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
                 ! Cut off bare long-range interaction if using Ewald
                 if (do_ewald) then
                     T = T + T_erfc_minus_bare(Rnij, geom%gamm, dTew, grad_ij)
-                    if (grad_ij%dcoords) dT%dr = dT%dr + dTew%dr
+                    if (grad_ij%dcoords) then
+                        do i = 1, 3
+                            dT%dr(i) = dT%dr(i) + dTew%dr(i)
+                        end do
+                    end if
                 end if
 
                 ! Copy over to potentially complex-valued tensor
@@ -322,17 +343,17 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
                 ! Multiply exp(-i q * Rnij), update gradients accordingly
                 qR = dot_product(q, Rnij)
                 exp_qR = complex(cos(qR), -sin(qR))
-                Tij = Tij + T * exp_qR
+                Tij = Tij + exp_qR * T
                 if (grad_ij%dcoords) then
-                    do concurrent(i=1:3)
-                        dTij_dr(:, :, i) = dT%dr(:, :, i) * exp_qR - IMI * q(i) * exp_qR * T
+                    do i = 1, 3
+                        dTij_dr(i) = exp_qR * dT%dr(i) - IMI * q(i) * exp_qR * T
                     end do
                 end if
-                if (grad_ij%dr_vdw) dTij%dvdw = dTij%dvdw + dT%dvdw * exp_qR
-                if (grad_ij%dsigma) dTij%dsigma = dTij%dsigma + dT%dsigma * exp_qR
+                if (grad_ij%dr_vdw) dTij%dvdw = dTij%dvdw + exp_qR * dT%dvdw
+                if (grad_ij%dsigma) dTij%dsigma = dTij%dsigma + exp_qR * dT%dsigma
                 if (grad_ij%dq) then
-                    do concurrent(i=1:3)
-                        dTij%dq(:, :, i) = dTij%dq(:, :, i) - IMI * Rnij(i) * exp_qR * T
+                    do i = 1, 3
+                        dTij%dq(i) = dTij%dq(i) - IMI * Rnij(i) * exp_qR * T
                     end do
                 end if
 #else
@@ -343,12 +364,18 @@ type(matrix_cplx_t) function dipole_matrix_complex( &
 #endif
                 if (grad%dlattice) then
                      do i_latt = 1, 3
-                        dTij%dlattice(:, :, i_latt, :) = &
-                            dTij%dlattice(:, :, i_latt, :) - dTij_dr * (n(i_latt))
+                        do i = 1, 3
+                            dTij%dlattice(i_latt, i) = &
+                                dTij%dlattice(i_latt, i) - real(n(i_latt), dp) * dTij_dr(i)
+                        end do
                     end do
                 end if
-                if (grad_ij%dcoords) dTij%dr = dTij%dr + dTij_dr
-            end do each_cell
+                if (grad_ij%dcoords) then
+                    do i = 1, 3
+                        dTij%dr(i) = dTij%dr(i) + dTij_dr(i)
+                    end do
+                end if
+        end do each_cell
 
             call dipmat_assign(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad)
         end do each_atom_pair
@@ -461,12 +488,12 @@ subroutine add_ewald_dipole_parts_complex(geom, dipmat, ddipmat, grad, q)
         each_atom_pair: do my_j_atom = 1, size(dipmat%idx%j_atom)
             j_atom = dipmat%idx%j_atom(my_j_atom)
 
-            Tij = 0_dp
+            Tij = 0.0_dp
             if (present(grad)) then
-                if (grad%dcoords) dTij%dR = 0_dp
-                if (grad%dlattice) dTij%dlattice = 0_dp
+                if (grad%dcoords) dTij%dR = 0.0_dp
+                if (grad%dlattice) dTij%dlattice = 0.0_dp
 #ifdef DO_COMPLEX_TYPE
-                if (grad%dq) dTij%dq = 0_dp
+                if (grad%dq) dTij%dq = 0.0_dp
 #endif
             end if
 
@@ -575,7 +602,8 @@ subroutine add_ewald_dipole_parts_complex(geom, dipmat, ddipmat, grad, q)
 
             end do each_recip_vec
 
-            call dipmat_add_assign(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad_ew)
+            ! FIXME: enable
+            !call dipmat_add_assign(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad_ew)
         end do each_atom_pair
     end do each_atom
 
@@ -586,47 +614,56 @@ end subroutine
 subroutine dipmat_assign_real(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad)
     type(matrix_re_t), intent(inout) :: dipmat
     type(grad_matrix_re_t), intent(inout), optional :: ddipmat
-    real(dp), intent(inout) :: Tij(3, 3)
-    type(grad_matrix_re_t), intent(inout) :: dTij
+    type(tensor_3x3_re_t), intent(inout) :: Tij
+    type(grad_tensor_3x3_re_t), intent(inout) :: dTij
 #else
 subroutine dipmat_assign_complex(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad)
     type(matrix_cplx_t), intent(inout) :: dipmat
     type(grad_matrix_cplx_t), intent(inout), optional :: ddipmat
-    complex(dp), intent(inout) :: Tij(3, 3)
-    type(grad_matrix_cplx_t), intent(inout) :: dTij
+    type(tensor_3x3_cplx_t), intent(inout) :: Tij
+    type(grad_tensor_3x3_cplx_t), intent(inout) :: dTij
 #endif
     integer, intent(in) :: i_atom, j_atom, my_i_atom, my_j_atom
     type(grad_request_t), intent(in), optional :: grad
 
-    integer :: i, j
+    integer :: i, j, a, b
 
     ! Store T
     i = 3 * (my_i_atom - 1)
     j = 3 * (my_j_atom - 1)
-    dipmat%val(i + 1:i + 3, j + 1:j + 3) = Tij
+    
+    call Tij%copy_to(dipmat%val(i + 1:i + 3, j + 1:j + 3))
 
     ! Store gradients
     if (.not. present(grad)) return
 
     if (grad%dcoords .and. i_atom /= j_atom) then
-        ddipmat%dr(i + 1:i + 3, j + 1:j + 3, :) = dTij%dr
+        do a = 1, 3
+            call dTij%dr(a)%copy_to(ddipmat%dr(i + 1:i + 3, j + 1:j + 3, a))
+        end do
     end if
 
     if (grad%dlattice) then
-        ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, :, :) = dTij%dlattice
+        do b = 1, 3
+            do a = 1, 3
+                call dTij%dlattice(a, b)%copy_to(ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, a, b))
+            end do
+        end do
     end if
 
     if (grad%dr_vdw) then
-        ddipmat%dvdw(i + 1:i + 3, j + 1:j + 3) = dTij%dvdw
+        call dTij%dvdw%copy_to(ddipmat%dvdw(i + 1:i + 3, j + 1:j + 3))
     end if
 
     if (grad%dsigma) then
-        ddipmat%dsigma(i + 1:i + 3, j + 1:j + 3) = dTij%dsigma
+        call dTij%dsigma%copy_to(ddipmat%dsigma(i + 1:i + 3, j + 1:j + 3))
     end if
 
 #ifdef DO_COMPLEX_TYPE
     if (grad%dq) then
-        ddipmat%dq(i + 1:i + 3, j + 1:j + 3, :) = dTij%dq
+        do a = 1, 3
+            call dTij%dq(a)%copy_to(ddipmat%dq(i + 1:i + 3, j + 1:j + 3, a))
+        end do
     end if
 #endif
 end subroutine
@@ -635,61 +672,58 @@ end subroutine
 subroutine dipmat_add_assign_real(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad)
     type(matrix_re_t), intent(inout) :: dipmat
     type(grad_matrix_re_t), intent(inout), optional :: ddipmat
-    real(dp), intent(inout) :: Tij(3, 3)
-    type(grad_matrix_re_t), intent(inout) :: dTij
+    type(tensor_3x3_re_t), intent(inout) :: Tij
+    type(grad_tensor_3x3_re_t), intent(inout) :: dTij
 #else
 subroutine dipmat_add_assign_complex(dipmat, ddipmat, i_atom, j_atom, my_i_atom, my_j_atom, Tij, dTij, grad)
     type(matrix_cplx_t), intent(inout) :: dipmat
     type(grad_matrix_cplx_t), intent(inout), optional :: ddipmat
-    complex(dp), intent(inout) :: Tij(3, 3)
-    type(grad_matrix_cplx_t), intent(inout) :: dTij
+    type(tensor_3x3_cplx_t), intent(inout) :: Tij
+    type(grad_tensor_3x3_cplx_t), intent(inout) :: dTij
 #endif
     integer, intent(in) :: i_atom, j_atom, my_i_atom, my_j_atom
     type(grad_request_t), intent(in), optional :: grad
 
-    integer :: i, j
+    integer :: i, j, a, b
 
     ! Store T
     i = 3 * (my_i_atom - 1)
     j = 3 * (my_j_atom - 1)
-    associate (T_sub => dipmat%val(i + 1:i + 3, j + 1:j + 3))
-        T_sub = T_sub + Tij
-    end associate
+
+    call Tij%add_to(dipmat%val(i + 1:i + 3, j + 1:j + 3))
 
     ! Store gradients
     if (.not. present(grad)) return
 
     if (grad%dcoords .and. i_atom /= j_atom) then
-        associate (dTdR_sub => ddipmat%dr(i + 1:i + 3, j + 1:j + 3, :))
-            dTdR_sub = dTdR_sub + dTij%dr
-        end associate
+        do a = 1, 3
+            call dTij%dr(a)%add_to(ddipmat%dr(i + 1:i + 3, j + 1:j + 3, a))
+        end do
     end if
 
     if (grad%dlattice) then
-        associate ( &
-            dTda_sub => ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, :, :) &
-        )
-            dTda_sub = dTda_sub + dTij%dlattice
-        end associate
+        do b = 1, 3
+            do a = 1, 3
+                call dTij%dlattice(a, b)%add_to( &
+                    ddipmat%dlattice(i + 1:i + 3, j + 1:j + 3, a, b) &
+                )
+            end do
+        end do
     end if
 
     if (grad%dr_vdw) then
-        associate (dTdRvdw_sub => ddipmat%dvdw(i + 1:i + 3, j + 1:j + 3))
-            dTdRvdw_sub = dTdRvdw_sub + dTij%dvdw
-        end associate
+        call dTij%dvdw%add_to(ddipmat%dvdw(i + 1:i + 3, j + 1:j + 3))
     end if
 
     if (grad%dsigma) then
-        associate (dTdsigma_sub => ddipmat%dsigma(i + 1:i + 3, j + 1:j + 3))
-            dTdsigma_sub = dTdsigma_sub + dTij%dsigma
-        end associate
+        call dTij%dsigma%add_to(ddipmat%dsigma(i + 1:i + 3, j + 1:j + 3))
     end if
 
 #ifdef DO_COMPLEX_TYPE
     if (grad%dq) then
-        associate (dTdq_sub => ddipmat%dq(i + 1:i + 3, j + 1:j + 3, :))
-            dTdq_sub = dTdq_sub + dTij%dq
-        end associate
+        do a = 1, 3
+            call dTij%dq(a)%add_to(ddipmat%dq(i + 1:i + 3, j + 1:j + 3, a))
+        end do
     end if
 #endif
 end subroutine
@@ -710,34 +744,23 @@ function build_T(r, d_inv, B, C, D, request_dr, request_dparam, dr, dB, dC, dpar
     real(dp), intent(in) :: r(3), d_inv, B, C, D
     logical, intent(in) :: request_dr, request_dparam
     real(dp), intent(in), optional :: dB, dC
-    real(dp), intent(out), optional :: dr(3, 3, 3), dparam(3, 3)
-    real(dp) :: T(3, 3)
+    type(tensor_3x3_re_t), intent(out), optional :: dr(3), dparam
+    type(tensor_3x3_re_t) :: T
 
     real(dp) :: C_over_d
     real(dp) :: ux, uy, uz
-    real(dp) :: xx, yy, zz, xy, xz, yz
     real(dp) :: xxx, yyy, zzz, yxx, yyx, zxx, zyy, zzx, zzy, xyz
 
     ux = d_inv * r(1)
     uy = d_inv * r(2)
     uz = d_inv * r(3)
 
-    xx = C * ux**2 + B
-    yy = C * uy**2 + B
-    zz = C * uz**2 + B
-    xy = C * ux * uy
-    xz = C * ux * uz
-    yz = C * uy * uz
-
-    T(1, 1) = xx
-    T(1, 2) = xy
-    T(1, 3) = xz
-    T(2, 1) = xy
-    T(2, 2) = yy
-    T(2, 3) = yz
-    T(3, 1) = xz
-    T(3, 2) = yz
-    T(3, 3) = zz
+    T%xx = C * ux**2 + B
+    T%yy = C * uy**2 + B
+    T%zz = C * uz**2 + B
+    T%xy = C * ux * uy
+    T%xz = C * ux * uz
+    T%yz = C * uy * uz
 
     if (request_dr .and. present(dr)) then
         C_over_d = C * d_inv
@@ -758,54 +781,35 @@ function build_T(r, d_inv, B, C, D, request_dr, request_dparam, dr, dB, dC, dpar
         ! Terms with all indices distinct
         xyz = ux * uy * uz * D
 
-        dr(1, 1, 1) = xxx
-        dr(2, 1, 1) = yxx
-        dr(3, 1, 1) = zxx
-        dr(1, 2, 1) = yxx
-        dr(2, 2, 1) = yyx
-        dr(3, 2, 1) = xyz
-        dr(1, 3, 1) = zxx
-        dr(2, 3, 1) = xyz
-        dr(3, 3, 1) = zzx
+        dr(1)%xx = xxx
+        dr(1)%yy = yyx
+        dr(1)%zz = zzx
+        dr(1)%xy = yxx
+        dr(1)%xz = zxx
+        dr(1)%yz = xyz
 
-        dr(1, 1, 2) = yxx
-        dr(2, 1, 2) = yyx
-        dr(3, 1, 2) = xyz
-        dr(1, 2, 2) = yyx
-        dr(2, 2, 2) = yyy
-        dr(3, 2, 2) = zyy
-        dr(1, 3, 2) = xyz
-        dr(2, 3, 2) = zyy
-        dr(3, 3, 2) = zzy
+        dr(2)%xx = yxx
+        dr(2)%yy = yyy
+        dr(2)%zz = zzy
+        dr(2)%xy = yyx
+        dr(2)%xz = xyz
+        dr(2)%yz = zyy
 
-        dr(1, 1, 3) = zxx
-        dr(2, 1, 3) = xyz
-        dr(3, 1, 3) = zzx
-        dr(1, 2, 3) = xyz
-        dr(2, 2, 3) = zyy
-        dr(3, 2, 3) = zzy
-        dr(1, 3, 3) = zzx
-        dr(2, 3, 3) = zzy
-        dr(3, 3, 3) = zzz
+        dr(3)%xx = zxx
+        dr(3)%yy = zyy
+        dr(3)%zz = zzz
+        dr(3)%xy = xyz
+        dr(3)%xz = zzx
+        dr(3)%yz = zzy
     end if
 
     if (request_dparam .and. present(dparam) .and. present(dB) .and. present(dC)) then
-        xx = dC * ux**2 + dB
-        yy = dC * uy**2 + dB
-        zz = dC * uz**2 + dB
-        xy = dC * ux * uy
-        xz = dC * ux * uz
-        yz = dC * uy * uz
-
-        dparam(1, 1) = xx
-        dparam(2, 1) = xy
-        dparam(3, 1) = xz
-        dparam(1, 2) = xy
-        dparam(2, 2) = yy
-        dparam(3, 2) = yz
-        dparam(1, 3) = xz
-        dparam(2, 3) = yz
-        dparam(3, 3) = zz
+        dparam%xx = dC * ux**2 + dB
+        dparam%yy = dC * uy**2 + dB
+        dparam%zz = dC * uz**2 + dB
+        dparam%xy = dC * ux * uy
+        dparam%xz = dC * ux * uz
+        dparam%yz = dC * uy * uz
     end if
 end function
 
@@ -819,9 +823,9 @@ function T_bare(r, dT, grad) result(T)
     !! \right)
     !! $$
     real(dp), intent(in) :: r(3)
-    type(grad_matrix_re_t), intent(inout), optional :: dT
+    type(grad_tensor_3x3_re_t), intent(inout), optional :: dT
     logical, intent(in), optional :: grad
-    real(dp) :: T(3, 3)
+    type(tensor_3x3_re_t) :: T
 
     real(dp) :: d_inv, B, C, D
 
@@ -853,9 +857,9 @@ function T_erfc(r, gamm, dT, grad) result(T)
     !! $$
     real(dp), intent(in) :: r(3)
     real(dp), intent(in) :: gamm
-    type(grad_matrix_re_t), intent(inout), optional :: dT
+    type(grad_tensor_3x3_re_t), intent(inout), optional :: dT
     type(grad_request_t), intent(in), optional :: grad
-    real(dp) :: T(3, 3)
+    type(tensor_3x3_re_t) :: T
 
     real(dp) :: r_1, r_2, d_inv
     real(dp) :: x, theta, rho, B, C, D, dB, dC
@@ -871,8 +875,8 @@ function T_erfc(r, gamm, dT, grad) result(T)
     C = -3 * B - d_inv * rho
     D = (2 * gamm**2 * rho - 5 * d_inv * C)
 
-    dB = 0_dp
-    dC = 0_dp
+    dB = 0.0_dp
+    dC = 0.0_dp
     if (grad%dgamma) then
         dB = -2 * d_inv * gamm * theta
         dC = -2 * x**2 * dB
@@ -885,9 +889,9 @@ end function
 function T_erfc_minus_bare(r, gamm, dT, grad) result(T)
     real(dp), intent(in) :: r(3)
     real(dp), intent(in) :: gamm
-    type(grad_matrix_re_t), intent(inout), optional :: dT
+    type(grad_tensor_3x3_re_t), intent(inout), optional :: dT
     type(grad_request_t), intent(in), optional :: grad
-    real(dp) :: T(3, 3)
+    type(tensor_3x3_re_t) :: T
 
     real(dp) :: r_1, r_2, d_inv
     real(dp) :: x, theta, rho, B, C, D, dB, dC
@@ -903,8 +907,8 @@ function T_erfc_minus_bare(r, gamm, dT, grad) result(T)
     C = -3 * B - d_inv * rho
     D = (2 * gamm**2 * rho - 5 * d_inv * C)
 
-    dB = 0_dp
-    dC = 0_dp
+    dB = 0.0_dp
+    dC = 0.0_dp
     if (grad%dgamma) then
         dB = -2 * d_inv * gamm * theta
         dC = -2 * x**2 * dB
@@ -937,9 +941,9 @@ function T_erf_coulomb(r, sigma, dT, grad) result(T)
     !! $$
     real(dp), intent(in) :: r(3)
     real(dp), intent(in) :: sigma
-    type(grad_matrix_re_t), intent(inout), optional :: dT
+    type(grad_tensor_3x3_re_t), intent(inout), optional :: dT
     type(grad_request_t), intent(in), optional :: grad
-    real(dp) :: T(3, 3)
+    type(tensor_3x3_re_t) :: T
 
     real(dp) :: r_1, d_inv, sigma_inv, x, theta, rho, B, C, D, dB, dC
 
@@ -954,8 +958,8 @@ function T_erf_coulomb(r, sigma, dT, grad) result(T)
     C = -3 * B + d_inv * rho
     D = -2 * sigma_inv**2 * rho - 5 * d_inv * C
 
-    dB = 0_dp
-    dC = 0_dp
+    dB = 0.0_dp
+    dC = 0.0_dp
     if (grad%dsigma) then
         dB = -2 * d_inv * sigma_inv**3 * theta
         dC = -2 * x**2 * dB
@@ -966,9 +970,9 @@ end function
 
 function T_1mexp_coulomb(r, sigma, a, dT, grad) result(T)
     real(dp), intent(in) :: r(3), sigma, a
-    type(grad_matrix_re_t), intent(inout), optional :: dT
+    type(grad_tensor_3x3_re_t), intent(inout), optional :: dT
     type(grad_request_t), intent(in), optional :: grad
-    real(dp) :: T(3, 3)
+    type(tensor_3x3_re_t) :: T
 
     real(dp) :: r_1, d_inv, x, B, C, D, tmp, dB, dC
 
@@ -980,8 +984,8 @@ function T_1mexp_coulomb(r, sigma, a, dT, grad) result(T)
     C = -B * (2 + a * (x - 1_dp))
     D = B * d_inv * (8 + a * (6 * (x - 1) + a * (x**2 - 3 * x + 1)))
 
-    dB = 0_dp
-    dC = 0_dp
+    dB = 0.0_dp
+    dC = 0.0_dp
     if (grad%dsigma) then
         tmp = B * a * d_inv * x**(1 / a)
         dB = tmp * (x - 1)
@@ -994,32 +998,33 @@ end function
 function damping_grad(f, df, T, dT, dfT, grad) result(fT)
     real(dp), intent(in) :: f
     type(grad_scalar_t), intent(in) :: df
-    real(dp), intent(in) :: T(3, 3)
-    type(grad_matrix_re_t), intent(inout) :: dT
-    type(grad_matrix_re_t), intent(inout) :: dfT
+    type(tensor_3x3_re_t), intent(in) :: T
+    type(grad_tensor_3x3_re_t), intent(inout) :: dT
+    type(grad_tensor_3x3_re_t), intent(inout) :: dfT
     type(grad_request_t), intent(in) :: grad
-    real(dp) :: fT(3, 3)
+    type(tensor_3x3_re_t) :: fT
 
     integer :: c, b, a
 
-    do concurrent(c = 1:3, b = 1:3)
-        fT(b, c) = f * T(b, c)
-    end do
+    fT = f * T
+
     if (grad%dcoords) then
-        dfT%dr = 0_dp
+        do a = 1, 3
+            call dfT%dr(a)%clear()
+        end do
         if (allocated(df%dr)) then
-            do concurrent(c = 1:3, b = 1:3, a = 1:3)
-                dfT%dr(a, b, c) = df%dr(c) * T(a, b)
+            do a = 1, 3
+                dfT%dr(a) = df%dr(a) * T
             end do
         end if
         if (allocated(dT%dr)) then
-            do concurrent(c = 1:3, b = 1:3, a = 1:3)
-                dfT%dr(a, b, c) = dfT%dr(a, b, c) + f * dT%dr(a, b, c)
+            do a = 1, 3
+                dfT%dr(a) = dfT%dr(a) + f * dT%dr(a)
             end do
         end if
     end if
     if (grad%dr_vdw) then
-        dfT%dvdw = 0_dp
+        call dfT%dvdw%clear()
         if (allocated(df%dvdw)) dfT%dvdw = df%dvdw * T
         if (allocated(dT%dvdw)) dfT%dvdw = dfT%dvdw + f * dT%dvdw
     end if

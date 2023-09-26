@@ -6,6 +6,7 @@ module mbd_gradients
 !! Derivatives.
 
 use mbd_constants
+use mbd_tensor, only: tensor_3x3_re_t, tensor_3x3_cplx_t
 
 implicit none
 
@@ -43,6 +44,25 @@ type, public :: grad_matrix_cplx_t
     complex(dp), allocatable :: dvdw(:, :)
     complex(dp), allocatable :: dsigma(:, :)
     complex(dp), allocatable :: dgamma(:, :)
+end type
+
+type, public :: grad_tensor_3x3_re_t
+    !! Derivatives of a real dipole matrix with respect to various quantities
+    type(tensor_3x3_re_t), allocatable :: dr(:)
+    type(tensor_3x3_re_t), allocatable :: dlattice(:, :)
+    type(tensor_3x3_re_t), allocatable :: dvdw
+    type(tensor_3x3_re_t), allocatable :: dsigma
+    type(tensor_3x3_re_t), allocatable :: dgamma
+end type
+
+type, public :: grad_tensor_3x3_cplx_t
+    !! Derivatives of a real dipole matrix with respect to various quantities
+    type(tensor_3x3_cplx_t), allocatable :: dr(:)
+    type(tensor_3x3_cplx_t), allocatable :: dlattice(:, :)
+    type(tensor_3x3_cplx_t), allocatable :: dq(:)
+    type(tensor_3x3_cplx_t), allocatable :: dvdw
+    type(tensor_3x3_cplx_t), allocatable :: dsigma
+    type(tensor_3x3_cplx_t), allocatable :: dgamma
 end type
 
 type, public :: grad_scalar_t

@@ -18,6 +18,7 @@ add_library(mbd
     mbd_methods.F90
     mbd_rpa.F90
     mbd_scs.f90
+    mbd_tensor.F90
     mbd_ts.F90
     mbd_utils.F90
     "${CMAKE_CURRENT_BINARY_DIR}/mbd_version.f90"
