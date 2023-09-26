@@ -12,7 +12,6 @@ use mbd_hamiltonian, only: get_mbd_hamiltonian_energy
 use mbd_matrix, only: matrix_re_t, matrix_cplx_t
 use mbd_methods, only: get_mbd_scs_energy
 use mbd_ts, only: get_ts_energy
-use mbd_scs, only: run_scs
 use mbd_utils, only: diff7, findval, tostr, result_t
 
 implicit none

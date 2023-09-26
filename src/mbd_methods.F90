@@ -9,7 +9,7 @@ use mbd_constants
 use mbd_damping, only: damping_t
 use mbd_formulas, only: omega_qho, alpha_dyn_qho, scale_with_ratio, C6_from_alpha
 use mbd_geom, only: geom_t
-use mbd_gradients, only: grad_t, grad_request_t
+use mbd_gradients, only: grad_t, grad_vector_re_t, grad_request_t
 use mbd_hamiltonian, only: get_mbd_hamiltonian_energy
 use mbd_lapack, only: eigvals, inverse
 use mbd_rpa, only: get_mbd_rpa_energy
@@ -168,7 +168,8 @@ type(result_t) function get_mbd_scs_energy(geom, variant, alpha_0, C6, damp, gra
     real(dp), allocatable :: alpha_dyn(:, :), alpha_dyn_scs(:, :), &
         dC6_scs_dalpha_dyn_scs(:, :), dene_dalpha_scs_dyn(:, :), freq_w(:), omega(:)
     real(dp) :: C6_scs(size(alpha_0))  ! circumventing PGI 19 compiler bug
-    type(grad_t), allocatable :: dalpha_dyn(:), dalpha_dyn_scs(:, :)
+    type(grad_t), allocatable :: dalpha_dyn(:)
+    type(grad_vector_re_t), allocatable :: dalpha_dyn_scs(:)
     type(grad_t) :: dE, dr_vdw_scs, domega
     type(grad_request_t) :: grad_scs
     type(damping_t) :: damp_scs, damp_mbd
@@ -186,7 +187,7 @@ type(result_t) function get_mbd_scs_energy(geom, variant, alpha_0, C6, damp, gra
     n_atoms = geom%siz()
     allocate (alpha_dyn(n_atoms, 0:n_freq))
     allocate (alpha_dyn_scs(n_atoms, 0:n_freq))
-    allocate (dalpha_dyn_scs(size(geom%idx%i_atom), 0:n_freq))
+    allocate (dalpha_dyn_scs(0:n_freq))
     if (grad%any()) allocate (dene_dalpha_scs_dyn(n_atoms, 0:n_freq))
     omega = omega_qho(C6, alpha_0, domega, grad)
     alpha_dyn = alpha_dyn_qho( &
@@ -204,7 +205,7 @@ type(result_t) function get_mbd_scs_energy(geom, variant, alpha_0, C6, damp, gra
     call geom%clock(50)
     do i_freq = 0, n_freq
         alpha_dyn_scs(:, i_freq) = run_scs( &
-            geom, alpha_dyn(:, i_freq), damp_scs, dalpha_dyn_scs(:, i_freq), grad_scs &
+            geom, alpha_dyn(:, i_freq), damp_scs, dalpha_dyn_scs(i_freq), grad_scs &
         )
         if (geom%has_exc()) return
     end do
@@ -238,13 +239,13 @@ type(result_t) function get_mbd_scs_energy(geom, variant, alpha_0, C6, damp, gra
     end do
     if (grad%dcoords) then
         allocate (dE%dcoords(n_atoms, 3), source=0d0)
-        do my_i_atom = 1, size(dalpha_dyn_scs, 1)
+        do my_i_atom = 1, size(geom%idx%i_atom)
             i_atom = geom%idx%i_atom(my_i_atom)
             do i_freq = 0, n_freq
                 dE%dcoords(geom%idx%j_atom, :) &
                     = dE%dcoords(geom%idx%j_atom, :) &
                     + freq_w(i_freq) * dene_dalpha_scs_dyn(i_atom, i_freq) &
-                    * dalpha_dyn_scs(my_i_atom, i_freq)%dcoords
+                    * dalpha_dyn_scs(i_freq)%dr(my_i_atom, :, :)
             end do
         end do
 #ifdef WITH_SCALAPACK
@@ -254,13 +255,13 @@ type(result_t) function get_mbd_scs_energy(geom, variant, alpha_0, C6, damp, gra
     end if
     if (grad%dlattice) then
         allocate (dE%dlattice(3, 3), source=0d0)
-        do my_i_atom = 1, size(dalpha_dyn_scs, 1)
+        do my_i_atom = 1, size(geom%idx%i_atom)
             i_atom = geom%idx%i_atom(my_i_atom)
             if (.not. any(i_atom == geom%idx%j_atom)) cycle
             do i_freq = 0, n_freq
                 dE%dlattice = dE%dlattice &
                     + freq_w(i_freq) * dene_dalpha_scs_dyn(i_atom, i_freq) &
-                    * dalpha_dyn_scs(my_i_atom, i_freq)%dlattice
+                    * dalpha_dyn_scs(i_freq)%dlattice(my_i_atom, :, :)
             end do
         end do
 #ifdef WITH_SCALAPACK
@@ -270,12 +271,12 @@ type(result_t) function get_mbd_scs_energy(geom, variant, alpha_0, C6, damp, gra
     end if
     if (grad%dalpha) then
         allocate (dE%dalpha(n_atoms), source=0d0)
-        do my_i_atom = 1, size(dalpha_dyn_scs, 1)
+        do my_i_atom = 1, size(geom%idx%i_atom)
             i_atom = geom%idx%i_atom(my_i_atom)
             do i_freq = 0, n_freq
                 dE%dalpha(geom%idx%j_atom) = dE%dalpha(geom%idx%j_atom) + &
                     freq_w(i_freq) * dene_dalpha_scs_dyn(i_atom, i_freq) * &
-                    dalpha_dyn_scs(my_i_atom, i_freq)%dalpha * ( &
+                    dalpha_dyn_scs(i_freq)%dalpha(my_i_atom, :) * ( &
                         dalpha_dyn(i_freq)%dalpha(geom%idx%j_atom) &
                         + dalpha_dyn(i_freq)%domega(geom%idx%j_atom) &
                         * domega%dalpha(geom%idx%j_atom) &
@@ -289,12 +290,12 @@ type(result_t) function get_mbd_scs_energy(geom, variant, alpha_0, C6, damp, gra
     end if
     if (grad%dC6) then
         allocate (dE%dC6(n_atoms), source=0d0)
-        do my_i_atom = 1, size(dalpha_dyn_scs, 1)
+        do my_i_atom = 1, size(geom%idx%i_atom)
             i_atom = geom%idx%i_atom(my_i_atom)
             do i_freq = 0, n_freq
                 dE%dC6(geom%idx%j_atom) = dE%dC6(geom%idx%j_atom) + &
                     freq_w(i_freq) * dene_dalpha_scs_dyn(i_atom, i_freq) * &
-                    dalpha_dyn_scs(my_i_atom, i_freq)%dalpha * &
+                    dalpha_dyn_scs(i_freq)%dalpha(my_i_atom, :) * &
                     dalpha_dyn(i_freq)%domega(geom%idx%j_atom) &
                     * domega%dC6(geom%idx%j_atom)
             end do
@@ -305,12 +306,12 @@ type(result_t) function get_mbd_scs_energy(geom, variant, alpha_0, C6, damp, gra
     end if
     if (grad%dr_vdw) then
         allocate (dE%dr_vdw(n_atoms), source=0d0)
-        do my_i_atom = 1, size(dalpha_dyn_scs, 1)
+        do my_i_atom = 1, size(geom%idx%i_atom)
             i_atom = geom%idx%i_atom(my_i_atom)
             do i_freq = 0, n_freq
                 dE%dr_vdw(geom%idx%j_atom) = dE%dr_vdw(geom%idx%j_atom) + &
                     freq_w(i_freq) * dene_dalpha_scs_dyn(i_atom, i_freq) * &
-                    dalpha_dyn_scs(my_i_atom, i_freq)%dr_vdw
+                    dalpha_dyn_scs(i_freq)%dvdw(my_i_atom, :)
             end do
         end do
 #ifdef WITH_SCALAPACK

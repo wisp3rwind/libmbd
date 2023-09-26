@@ -27,6 +27,16 @@ type, public :: grad_t
     real(dp), allocatable :: dX_free(:)
 end type
 
+type, public :: grad_vector_re_t
+    !! Derivatives of a real dipole matrix with respect to various quantities
+    real(dp), allocatable :: dr(:, :, :)
+    real(dp), allocatable :: dlattice(:, :, :)
+    real(dp), allocatable :: dvdw(:, :)
+    real(dp), allocatable :: dsigma(:, :)
+    real(dp), allocatable :: dgamma(:, :)
+    real(dp), allocatable :: dalpha(:, :)
+end type
+
 type, public :: grad_matrix_re_t
     !! Derivatives of a real dipole matrix with respect to various quantities
     real(dp), allocatable :: dr(:, :, :)
@@ -34,6 +44,7 @@ type, public :: grad_matrix_re_t
     real(dp), allocatable :: dvdw(:, :)
     real(dp), allocatable :: dsigma(:, :)
     real(dp), allocatable :: dgamma(:, :)
+    real(dp), allocatable :: dalpha(:, :)
 end type
 
 type, public :: grad_matrix_cplx_t
@@ -44,6 +55,7 @@ type, public :: grad_matrix_cplx_t
     complex(dp), allocatable :: dvdw(:, :)
     complex(dp), allocatable :: dsigma(:, :)
     complex(dp), allocatable :: dgamma(:, :)
+    complex(dp), allocatable :: dalpha(:, :)
 end type
 
 type, public :: grad_tensor_3x3_re_t

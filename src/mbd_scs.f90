@@ -10,7 +10,7 @@ use mbd_damping, only: damping_t
 use mbd_dipole, only: dipole_matrix
 use mbd_formulas, only: sigma_selfint
 use mbd_geom, only: geom_t
-use mbd_gradients, only: grad_t, grad_matrix_re_t, grad_request_t
+use mbd_gradients, only: grad_t, grad_vector_re_t, grad_matrix_re_t, grad_request_t
 use mbd_matrix, only: matrix_re_t, contract_cross_33
 use mbd_utils, only: findval
 
@@ -48,7 +48,7 @@ function run_scs(geom, alpha, damp, dalpha_scs, grad) result(alpha_scs)
     type(geom_t), intent(inout) :: geom
     real(dp), intent(in) :: alpha(:)
     type(damping_t), intent(in) :: damp
-    type(grad_t), intent(out) :: dalpha_scs(:)
+    type(grad_vector_re_t), intent(out) :: dalpha_scs
     type(grad_request_t), intent(in) :: grad
     real(dp) :: alpha_scs(size(alpha))
 
@@ -99,9 +99,8 @@ function run_scs(geom, alpha, damp, dalpha_scs, grad) result(alpha_scs)
     call alpha_full%contract_n_transp('R', alpha_prime)
     call dQ%init_from(T)
     if (grad%dcoords) then
-        do my_i_atom = 1, size(geom%idx%i_atom)
-            allocate (dalpha_scs(my_i_atom)%dcoords(size(geom%idx%j_atom), 3))
-        end do
+        allocate (dalpha_scs%dr( &
+            size(geom%idx%i_atom), size(geom%idx%j_atom), 3))
         do i_xyz = 1, 3
             dQ%val = -dT%dr(:, :, i_xyz)
             call geom%clock(14)
@@ -121,7 +120,7 @@ function run_scs(geom, alpha, damp, dalpha_scs, grad) result(alpha_scs)
                 )
                 my_i_atom = findval(geom%idx%i_atom, i_atom)
                 if (my_i_atom > 0) then
-                    dalpha_scs(my_i_atom)%dcoords(:, i_xyz) = &
+                    dalpha_scs%dr(my_i_atom, :, i_xyz) = &
                         grads_i(geom%idx%j_atom)
                 end if
             end do
@@ -129,9 +128,7 @@ function run_scs(geom, alpha, damp, dalpha_scs, grad) result(alpha_scs)
         end do
     end if
     if (grad%dlattice) then
-        do my_i_atom = 1, size(geom%idx%i_atom)
-            allocate (dalpha_scs(my_i_atom)%dlattice(3, 3))
-        end do
+        allocate (dalpha_scs%dlattice(size(geom%idx%i_atom), 3, 3))
         do i_latt = 1, 3
             do i_xyz = 1, 3
                 dQ%val = -dT%dlattice(:, :, i_latt, i_xyz)
@@ -142,7 +139,7 @@ function run_scs(geom, alpha, damp, dalpha_scs, grad) result(alpha_scs)
                 call geom%clock(15)
                 dalphadA = dQ%contract_n33diag_cols()
                 do concurrent(my_i_atom=1:size(geom%idx%i_atom))
-                    dalpha_scs(my_i_atom)%dlattice(i_latt, i_xyz) &
+                    dalpha_scs%dlattice(my_i_atom, i_latt, i_xyz) &
                         = dalphadA(geom%idx%i_atom(my_i_atom))
                 end do
                 call geom%clock(-15)
@@ -168,7 +165,7 @@ function run_scs(geom, alpha, damp, dalpha_scs, grad) result(alpha_scs)
             )
             my_i_atom = findval(geom%idx%i_atom, i_atom)
             if (my_i_atom > 0) then
-                dalpha_scs(my_i_atom)%dalpha = grads_i(geom%idx%j_atom)
+                dalpha_scs%dalpha(my_i_atom, :) = grads_i(geom%idx%j_atom)
             end if
         end do
         call geom%clock(-15)
@@ -186,7 +183,7 @@ function run_scs(geom, alpha, damp, dalpha_scs, grad) result(alpha_scs)
             )
             my_i_atom = findval(geom%idx%i_atom, i_atom)
             if (my_i_atom > 0) then
-                dalpha_scs(my_i_atom)%dr_vdw = grads_i(geom%idx%j_atom)
+                dalpha_scs%dvdw(my_i_atom, :) = grads_i(geom%idx%j_atom)
             end if
         end do
         call geom%clock(-15)
