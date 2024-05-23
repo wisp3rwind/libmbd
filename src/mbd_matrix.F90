@@ -405,8 +405,16 @@ complex(dp) function matrix_cplx_sum_all(this) result(res)
 #endif
 end function
 
-!! Contract a 3N x 3N matrix over rows or columns, yielding a 
+!! Contract and transpose a 3N x 3N matrix over rows or columns, yielding a 
 !! 3 x 3N or 3N x 3 matrix, respectively.
+!! dir == "R"
+!! $$
+!! res_{b,ia} = sum_{j} this_{ia,jb}
+!! $$
+!! dir == "C"
+!! $$
+!! res_{jb,a} = sum_{i} this_{ia,jb}
+!! $$
 #ifndef DO_COMPLEX_TYPE
 subroutine matrix_re_contract_n_transp(this, dir, res)
     class(matrix_re_t), intent(in) :: this
@@ -498,6 +506,9 @@ function contract_cross_33_complex(k_atom, A, A_prime, B, B_prime) result(res)
 #endif
 end function
 
+!! $$
+!! res_j = (1 / 3) * \sum_{ia} A_{ia,ja}
+!! $$
 #ifndef DO_COMPLEX_TYPE
 function matrix_re_contract_n33diag_cols(A) result(res)
     class(matrix_re_t), intent(in) :: A
